@@ -29,6 +29,24 @@ cli:
     about: "Publish workspace as HTML"
   - name: preview
     about: "Preview published workspace"
+requested_permissions:
+  defaults:
+    read_files:
+      include: ["all"]
+    edit_files:
+      include: ["all"]
+    create_files:
+      include: ["all"]
+    http_requests:
+      include: ["unpkg.com"]
+    plugin_storage:
+      include: ["all"]
+  reasons:
+    read_files: "Read workspace entries and attachments while building export output."
+    edit_files: "Update generated publish artifacts during export and preview workflows."
+    create_files: "Create exported HTML, assets, and converted output files."
+    http_requests: "Download optional converter WASM modules used for format conversion."
+    plugin_storage: "Cache downloaded converter modules between runs."
 ---
 
 # diaryx_publish_extism

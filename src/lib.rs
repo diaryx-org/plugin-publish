@@ -65,6 +65,8 @@ struct GuestManifest {
     version: String,
     description: String,
     capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    requested_permissions: Option<JsonValue>,
     #[serde(default)]
     ui: Vec<JsonValue>,
     #[serde(default)]
@@ -119,13 +121,6 @@ pub fn manifest(_input: String) -> FnResult<String> {
         plugin_command: "OpenExportDialog".into(),
     };
 
-    let palette_publish = UiContribution::CommandPaletteItem {
-        id: "publish-site".into(),
-        label: "Publish Site".into(),
-        group: Some("Publish".into()),
-        plugin_command: "OpenPublishPanel".into(),
-    };
-
     let pm = PluginManifest {
         id: PluginId("diaryx.publish".into()),
         name: "Publish".into(),
@@ -137,7 +132,7 @@ pub fn manifest(_input: String) -> FnResult<String> {
                 commands: all_commands(),
             },
         ],
-        ui: vec![sidebar, palette_export, palette_publish],
+        ui: vec![sidebar, palette_export],
         cli: vec![],
     };
 
@@ -147,11 +142,23 @@ pub fn manifest(_input: String) -> FnResult<String> {
         version: pm.version,
         description: pm.description,
         capabilities: vec!["workspace_events".into(), "custom_commands".into()],
-        ui: vec![
-            serde_json::to_value(&pm.ui[0]).unwrap_or_default(),
-            serde_json::to_value(&pm.ui[1]).unwrap_or_default(),
-            serde_json::to_value(&pm.ui[2]).unwrap_or_default(),
-        ],
+        requested_permissions: Some(serde_json::json!({
+            "defaults": {
+                "read_files": { "include": ["all"], "exclude": [] },
+                "edit_files": { "include": ["all"], "exclude": [] },
+                "create_files": { "include": ["all"], "exclude": [] },
+                "http_requests": { "include": ["unpkg.com"], "exclude": [] },
+                "plugin_storage": { "include": ["all"], "exclude": [] }
+            },
+            "reasons": {
+                "read_files": "Read workspace entries and attachments while building export output.",
+                "edit_files": "Update generated publish artifacts during export and preview workflows.",
+                "create_files": "Create exported HTML, assets, and converted output files.",
+                "http_requests": "Download optional converter WASM modules used for format conversion.",
+                "plugin_storage": "Cache downloaded converter modules between runs."
+            }
+        })),
+        ui: pm.ui.iter().map(|u| serde_json::to_value(u).unwrap_or_default()).collect(),
         commands: all_commands(),
         cli: vec![
             serde_json::json!({
@@ -465,6 +472,10 @@ fn all_commands() -> Vec<String> {
         "ConvertToPdf",
         "OpenExportDialog",
         "OpenPublishPanel",
+        "GetPublishConfig",
+        "SetPublishConfig",
+        "GetAudiencePublishStates",
+        "SetAudiencePublishState",
     ]
     .into_iter()
     .map(String::from)
