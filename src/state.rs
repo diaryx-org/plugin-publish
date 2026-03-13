@@ -4,10 +4,52 @@
 //! the plugin state. All access is through `with_state()` / `with_state_mut()`.
 
 use std::cell::RefCell;
+use std::path::Path;
+use std::sync::Arc;
 
-use diaryx_publish::PublishPlugin;
+use indexmap::IndexMap;
+use serde_yaml::Value as YamlValue;
 
+use diaryx_core::publish::BodyRenderer;
+use crate::publish_plugin::PublishPlugin;
+
+use crate::host_bridge;
 use crate::host_fs::HostFs;
+
+/// Body renderer that delegates to the templating plugin via `host_plugin_command`.
+struct PluginBodyRenderer;
+
+impl BodyRenderer for PluginBodyRenderer {
+    fn has_templates(&self, body: &str) -> bool {
+        body.contains("{{")
+    }
+
+    fn render_body(
+        &self,
+        body: &str,
+        frontmatter: &IndexMap<String, YamlValue>,
+        file_path: &Path,
+        workspace_root: Option<&Path>,
+        audience: Option<&str>,
+    ) -> Result<String, String> {
+        let mut params = serde_json::json!({
+            "body": body,
+            "frontmatter": frontmatter,
+            "file_path": file_path.to_string_lossy(),
+        });
+        if let Some(root) = workspace_root {
+            params["workspace_root"] = serde_json::Value::String(root.to_string_lossy().into());
+        }
+        if let Some(aud) = audience {
+            params["audience"] = serde_json::Value::String(aud.into());
+        }
+        let result = host_bridge::plugin_command("diaryx.templating", "RenderBody", params)?;
+        result
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| "RenderBody did not return a string".into())
+    }
+}
 
 /// State held by the publish plugin guest for the lifetime of the WASM instance.
 pub struct PluginState {
@@ -26,7 +68,8 @@ pub fn init_state() -> Result<(), String> {
         if borrow.is_some() {
             return Ok(()); // Already initialized
         }
-        let plugin = PublishPlugin::new(HostFs);
+        let renderer: Arc<dyn BodyRenderer> = Arc::new(PluginBodyRenderer);
+        let plugin = PublishPlugin::with_renderer(HostFs, renderer);
         *borrow = Some(PluginState {
             publish_plugin: plugin,
         });

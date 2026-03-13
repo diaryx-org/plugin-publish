@@ -6,6 +6,7 @@
 pub mod converter;
 pub mod host_bridge;
 pub mod host_fs;
+pub mod publish_plugin;
 pub mod state;
 
 mod custom_random {
