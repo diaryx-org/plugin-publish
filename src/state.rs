@@ -11,12 +11,12 @@ use indexmap::IndexMap;
 use serde_yaml::Value as YamlValue;
 
 use diaryx_core::publish::BodyRenderer;
+use diaryx_plugin_sdk::host;
 use crate::publish_plugin::PublishPlugin;
 
-use crate::host_bridge;
 use crate::host_fs::HostFs;
 
-/// Body renderer that delegates to the templating plugin via `host_plugin_command`.
+/// Body renderer that delegates to the templating plugin via `host::plugins::call`.
 struct PluginBodyRenderer;
 
 impl BodyRenderer for PluginBodyRenderer {
@@ -43,7 +43,7 @@ impl BodyRenderer for PluginBodyRenderer {
         if let Some(aud) = audience {
             params["audience"] = serde_json::Value::String(aud.into());
         }
-        let result = host_bridge::plugin_command("diaryx.templating", "RenderBody", params)?;
+        let result = host::plugins::call("diaryx.templating", "RenderBody", params)?;
         result
             .as_str()
             .map(String::from)

@@ -2,7 +2,7 @@
 title: "Publish"
 description: "Export and publish content with optional format conversion"
 id: "diaryx.publish"
-version: "0.1.0"
+version: "0.1.3"
 author: "Diaryx Team"
 license: "PolyForm Shield 1.0.0"
 repository: "https://github.com/diaryx-org/plugin-publish"
@@ -52,6 +52,8 @@ requested_permissions:
 # diaryx_publish_extism
 
 Extism guest plugin wrapping publish/export functionality for browser and native runtimes.
+The publish pipeline now comes from `diaryx_core::publish`; there is no separate
+`diaryx_publish` crate dependency anymore.
 
 ## Overview
 
@@ -96,14 +98,16 @@ The plugin handles:
 
 ## Build
 
+This repository can be built standalone with Cargo:
+
 ```bash
 cargo build --target wasm32-unknown-unknown -p diaryx_publish_extism --release
 ```
 
-Or use:
+When vendored into the Diaryx monorepo, you can still use the monorepo helper:
 
 ```bash
-./scripts/build-wasm.sh
+cd ../diaryx && ./scripts/build-wasm.sh
 ```
 
 which copies the artifact to `apps/web/public/plugins/diaryx_publish.wasm`.

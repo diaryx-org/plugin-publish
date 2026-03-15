@@ -4,52 +4,13 @@
 //! and by `@extism/extism` in the web app.
 
 pub mod converter;
-pub mod host_bridge;
 pub mod host_fs;
 pub mod publish_plugin;
 pub mod state;
 
-mod custom_random {
-    use std::sync::atomic::{AtomicU64, Ordering};
+use diaryx_plugin_sdk::prelude::*;
 
-    static RNG_STATE: AtomicU64 = AtomicU64::new(0);
-
-    fn xorshift_fill(buf: &mut [u8]) {
-        let mut state = RNG_STATE.load(Ordering::Relaxed);
-        if state == 0 {
-            state = crate::host_bridge::get_timestamp().unwrap_or(42);
-            if state == 0 {
-                state = 42;
-            }
-        }
-        for byte in buf.iter_mut() {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            *byte = state as u8;
-        }
-        RNG_STATE.store(state, Ordering::Relaxed);
-    }
-
-    fn custom_getrandom_v02(buf: &mut [u8]) -> Result<(), getrandom::Error> {
-        xorshift_fill(buf);
-        Ok(())
-    }
-
-    getrandom::register_custom_getrandom!(custom_getrandom_v02);
-
-    #[unsafe(no_mangle)]
-    unsafe extern "Rust" fn __getrandom_v03_custom(
-        dest: *mut u8,
-        len: usize,
-    ) -> Result<(), getrandom_03::Error> {
-        unsafe {
-            let buf = core::slice::from_raw_parts_mut(dest, len);
-            xorshift_fill(buf);
-        }
-        Ok(())
-    }
-}
+diaryx_plugin_sdk::register_getrandom_v02!();
 
 use extism_pdk::*;
 use serde_json::Value as JsonValue;
@@ -58,50 +19,6 @@ use diaryx_core::plugin::{
     ComponentRef, PluginCapability, PluginContext, PluginId, PluginManifest, SidebarSide,
     UiContribution,
 };
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct GuestManifest {
-    id: String,
-    name: String,
-    version: String,
-    description: String,
-    capabilities: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    requested_permissions: Option<JsonValue>,
-    #[serde(default)]
-    ui: Vec<JsonValue>,
-    #[serde(default)]
-    commands: Vec<String>,
-    #[serde(default)]
-    cli: Vec<JsonValue>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct GuestEvent {
-    event_type: String,
-    payload: JsonValue,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct CommandRequest {
-    command: String,
-    params: JsonValue,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct CommandResponse {
-    success: bool,
-    #[serde(default)]
-    data: Option<JsonValue>,
-    #[serde(default)]
-    error: Option<String>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct InitParams {
-    #[serde(default)]
-    workspace_root: Option<String>,
-}
 
 #[plugin_fn]
 pub fn manifest(_input: String) -> FnResult<String> {
@@ -138,27 +55,28 @@ pub fn manifest(_input: String) -> FnResult<String> {
     };
 
     let manifest = GuestManifest {
+        protocol_version: CURRENT_PROTOCOL_VERSION,
         id: pm.id.0,
         name: pm.name,
         version: pm.version,
         description: pm.description,
         capabilities: vec!["workspace_events".into(), "custom_commands".into()],
-        requested_permissions: Some(serde_json::json!({
-            "defaults": {
+        requested_permissions: Some(GuestRequestedPermissions {
+            defaults: serde_json::json!({
                 "read_files": { "include": ["all"], "exclude": [] },
                 "edit_files": { "include": ["all"], "exclude": [] },
                 "create_files": { "include": ["all"], "exclude": [] },
                 "http_requests": { "include": ["unpkg.com"], "exclude": [] },
                 "plugin_storage": { "include": ["all"], "exclude": [] }
-            },
-            "reasons": {
-                "read_files": "Read workspace entries and attachments while building export output.",
-                "edit_files": "Update generated publish artifacts during export and preview workflows.",
-                "create_files": "Create exported HTML, assets, and converted output files.",
-                "http_requests": "Download optional converter WASM modules used for format conversion.",
-                "plugin_storage": "Cache downloaded converter modules between runs."
-            }
-        })),
+            }),
+            reasons: [
+                ("read_files".into(), "Read workspace entries and attachments while building export output.".into()),
+                ("edit_files".into(), "Update generated publish artifacts during export and preview workflows.".into()),
+                ("create_files".into(), "Create exported HTML, assets, and converted output files.".into()),
+                ("http_requests".into(), "Download optional converter WASM modules used for format conversion.".into()),
+                ("plugin_storage".into(), "Cache downloaded converter modules between runs.".into()),
+            ].into_iter().collect(),
+        }),
         ui: pm.ui.iter().map(|u| serde_json::to_value(u).unwrap_or_default()).collect(),
         commands: all_commands(),
         cli: vec![
@@ -213,14 +131,20 @@ pub fn init(input: String) -> FnResult<String> {
         init_result.map_err(extism_pdk::Error::msg)?;
     }
 
-    host_bridge::log_message("info", "Publish plugin initialized");
+    host::log::log("info", "Publish plugin initialized");
     Ok(String::new())
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct InitParams {
+    #[serde(default)]
+    workspace_root: Option<String>,
 }
 
 #[plugin_fn]
 pub fn shutdown(_input: String) -> FnResult<String> {
     if let Err(e) = state::shutdown_state() {
-        host_bridge::log_message("warn", &format!("Shutdown state cleanup failed: {e}"));
+        host::log::log("warn", &format!("Shutdown state cleanup failed: {e}"));
     }
     Ok(String::new())
 }
@@ -253,16 +177,8 @@ pub fn handle_command(input: String) -> FnResult<String> {
                 .and_then(|v| serde_json::from_value(v).ok());
 
             match converter::convert_format(content, from, to, resources.as_ref()) {
-                Ok(result) => CommandResponse {
-                    success: true,
-                    data: Some(serde_json::to_value(result).unwrap_or_default()),
-                    error: None,
-                },
-                Err(e) => CommandResponse {
-                    success: false,
-                    data: None,
-                    error: Some(e),
-                },
+                Ok(result) => CommandResponse::ok(serde_json::to_value(result).unwrap_or_default()),
+                Err(e) => CommandResponse::err(e),
             }
         }
         "ConvertToPdf" => {
@@ -283,16 +199,8 @@ pub fn handle_command(input: String) -> FnResult<String> {
                 .and_then(|v| serde_json::from_value(v).ok());
 
             match converter::convert_format(content, from, "pdf", resources.as_ref()) {
-                Ok(result) => CommandResponse {
-                    success: true,
-                    data: Some(serde_json::to_value(result).unwrap_or_default()),
-                    error: None,
-                },
-                Err(e) => CommandResponse {
-                    success: false,
-                    data: None,
-                    error: Some(e),
-                },
+                Ok(result) => CommandResponse::ok(serde_json::to_value(result).unwrap_or_default()),
+                Err(e) => CommandResponse::err(e),
             }
         }
         "DownloadConverter" => {
@@ -302,16 +210,8 @@ pub fn handle_command(input: String) -> FnResult<String> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("pandoc");
             match converter::download_converter(name) {
-                Ok(()) => CommandResponse {
-                    success: true,
-                    data: Some(serde_json::json!({ "ok": true })),
-                    error: None,
-                },
-                Err(e) => CommandResponse {
-                    success: false,
-                    data: None,
-                    error: Some(e),
-                },
+                Ok(()) => CommandResponse::ok(serde_json::json!({ "ok": true })),
+                Err(e) => CommandResponse::err(e),
             }
         }
         "IsConverterAvailable" => {
@@ -321,17 +221,11 @@ pub fn handle_command(input: String) -> FnResult<String> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("pandoc");
             let available = converter::is_converter_available(name);
-            CommandResponse {
-                success: true,
-                data: Some(serde_json::json!({ "available": available })),
-                error: None,
-            }
+            CommandResponse::ok(serde_json::json!({ "available": available }))
         }
-        "GetExportFormats" => CommandResponse {
-            success: true,
-            data: Some(serde_json::to_value(converter::get_export_formats()).unwrap_or_default()),
-            error: None,
-        },
+        "GetExportFormats" => CommandResponse::ok(
+            serde_json::to_value(converter::get_export_formats()).unwrap_or_default(),
+        ),
         _ => {
             let result = state::with_state(|s| {
                 poll_future(diaryx_core::plugin::WorkspacePlugin::handle_command(
@@ -342,26 +236,10 @@ pub fn handle_command(input: String) -> FnResult<String> {
             });
 
             match result {
-                Ok(Some(Ok(data))) => CommandResponse {
-                    success: true,
-                    data: Some(data),
-                    error: None,
-                },
-                Ok(Some(Err(e))) => CommandResponse {
-                    success: false,
-                    data: None,
-                    error: Some(e.to_string()),
-                },
-                Ok(None) => CommandResponse {
-                    success: false,
-                    data: None,
-                    error: Some(format!("Unknown command: {}", req.command)),
-                },
-                Err(e) => CommandResponse {
-                    success: false,
-                    data: None,
-                    error: Some(e),
-                },
+                Ok(Some(Ok(data))) => CommandResponse::ok(data),
+                Ok(Some(Err(e))) => CommandResponse::err(e.to_string()),
+                Ok(None) => CommandResponse::err(format!("Unknown command: {}", req.command)),
+                Err(e) => CommandResponse::err(e),
             }
         }
     };

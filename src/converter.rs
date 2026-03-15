@@ -1,7 +1,7 @@
 //! Format conversion orchestration.
 //!
 //! Downloads pandoc/typst WASM binaries on demand and runs them via
-//! `host_run_wasi_module`. All converter state is cached in plugin storage.
+//! `host::wasi::run`. All converter state is cached in plugin storage.
 
 use std::collections::HashMap;
 
@@ -9,7 +9,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize};
 
-use crate::host_bridge;
+use diaryx_plugin_sdk::host;
 
 // ============================================================================
 // Constants
@@ -95,7 +95,7 @@ pub fn is_converter_available(name: &str) -> bool {
         "pandoc" => PANDOC_STORAGE_KEY,
         _ => return false,
     };
-    host_bridge::storage_get(key)
+    host::storage::get(key)
         .map(|v| v.is_some())
         .unwrap_or(false)
 }
@@ -107,9 +107,9 @@ pub fn download_converter(name: &str) -> Result<(), String> {
         _ => return Err(format!("Unknown converter: {name}")),
     };
 
-    host_bridge::log_message("info", &format!("Downloading {name} WASM from {url}..."));
+    host::log::log("info", &format!("Downloading {name} WASM from {url}..."));
 
-    let response = host_bridge::http_request(url, "GET", &HashMap::new(), None)?;
+    let response = host::http::request("GET", url, &HashMap::new(), None)?;
 
     if response.status != 200 {
         return Err(format!(
@@ -126,9 +126,9 @@ pub fn download_converter(name: &str) -> Result<(), String> {
     } else {
         response.body.into_bytes()
     };
-    host_bridge::storage_set(key, &wasm_bytes)?;
+    host::storage::set(key, &wasm_bytes)?;
 
-    host_bridge::log_message(
+    host::log::log(
         "info",
         &format!("Downloaded {name} WASM ({} bytes)", wasm_bytes.len()),
     );
@@ -187,7 +187,7 @@ pub fn convert_format(
 
     let output_files = output_filename.as_ref().map(|f| vec![f.clone()]);
 
-    let request = host_bridge::WasiRunRequest {
+    let request = host::wasi::WasiRunRequest {
         module_key: PANDOC_STORAGE_KEY.to_string(),
         args,
         stdin: Some(stdin_b64),
@@ -195,7 +195,7 @@ pub fn convert_format(
         output_files,
     };
 
-    let result = host_bridge::run_wasi_module(&request)?;
+    let result = host::wasi::run(&request)?;
 
     if result.exit_code != 0 {
         return Err(format!(
