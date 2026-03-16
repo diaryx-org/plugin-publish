@@ -54,59 +54,58 @@ pub fn manifest(_input: String) -> FnResult<String> {
         cli: vec![],
     };
 
-    let manifest = GuestManifest {
-        protocol_version: CURRENT_PROTOCOL_VERSION,
-        id: pm.id.0,
-        name: pm.name,
-        version: pm.version,
-        description: pm.description,
-        capabilities: vec!["workspace_events".into(), "custom_commands".into()],
-        requested_permissions: Some(GuestRequestedPermissions {
-            defaults: serde_json::json!({
-                "read_files": { "include": ["all"], "exclude": [] },
-                "edit_files": { "include": ["all"], "exclude": [] },
-                "create_files": { "include": ["all"], "exclude": [] },
-                "http_requests": { "include": ["unpkg.com"], "exclude": [] },
-                "plugin_storage": { "include": ["all"], "exclude": [] }
-            }),
-            reasons: [
-                ("read_files".into(), "Read workspace entries and attachments while building export output.".into()),
-                ("edit_files".into(), "Update generated publish artifacts during export and preview workflows.".into()),
-                ("create_files".into(), "Create exported HTML, assets, and converted output files.".into()),
-                ("http_requests".into(), "Download optional converter WASM modules used for format conversion.".into()),
-                ("plugin_storage".into(), "Cache downloaded converter modules between runs.".into()),
-            ].into_iter().collect(),
+    let manifest = GuestManifest::new(
+        pm.id.0,
+        pm.name,
+        pm.version,
+        pm.description,
+        vec!["workspace_events".into(), "custom_commands".into()],
+    )
+    .ui(pm.ui.iter().map(|u| serde_json::to_value(u).unwrap_or_default()).collect())
+    .commands(all_commands())
+    .cli(vec![
+        serde_json::json!({
+            "name": "publish", "about": "Publish workspace as HTML for sharing",
+            "aliases": ["pub"], "native_handler": "publish",
+            "args": [
+                {"name": "destination", "required": true, "help": "Destination path", "value_type": "Path"},
+                {"name": "audience", "short": "a", "long": "audience", "help": "Target audience"},
+                {"name": "format", "short": "F", "long": "format", "default_value": "html", "help": "Output format"},
+                {"name": "single-file", "long": "single-file", "is_flag": true, "help": "Single file output"},
+                {"name": "title", "short": "t", "long": "title", "help": "Site title"},
+                {"name": "force", "short": "f", "long": "force", "is_flag": true, "help": "Overwrite existing"},
+                {"name": "no-copy-attachments", "long": "no-copy-attachments", "is_flag": true, "help": "Skip attachments"},
+                {"name": "dry-run", "long": "dry-run", "is_flag": true, "help": "Show plan only"}
+            ]
         }),
-        ui: pm.ui.iter().map(|u| serde_json::to_value(u).unwrap_or_default()).collect(),
-        commands: all_commands(),
-        cli: vec![
-            serde_json::json!({
-                "name": "publish", "about": "Publish workspace as HTML for sharing",
-                "aliases": ["pub"], "native_handler": "publish",
-                "args": [
-                    {"name": "destination", "required": true, "help": "Destination path", "value_type": "Path"},
-                    {"name": "audience", "short": "a", "long": "audience", "help": "Target audience"},
-                    {"name": "format", "short": "F", "long": "format", "default_value": "html", "help": "Output format"},
-                    {"name": "single-file", "long": "single-file", "is_flag": true, "help": "Single file output"},
-                    {"name": "title", "short": "t", "long": "title", "help": "Site title"},
-                    {"name": "force", "short": "f", "long": "force", "is_flag": true, "help": "Overwrite existing"},
-                    {"name": "no-copy-attachments", "long": "no-copy-attachments", "is_flag": true, "help": "Skip attachments"},
-                    {"name": "dry-run", "long": "dry-run", "is_flag": true, "help": "Show plan only"}
-                ]
-            }),
-            serde_json::json!({
-                "name": "preview", "about": "Preview workspace as local website with live reload",
-                "native_handler": "preview",
-                "args": [
-                    {"name": "port", "short": "p", "long": "port", "default_value": "3456",
-                     "value_type": "Integer", "help": "HTTP port"},
-                    {"name": "no-open", "long": "no-open", "is_flag": true, "help": "Don't auto-open browser"},
-                    {"name": "audience", "short": "a", "long": "audience", "help": "Target audience"},
-                    {"name": "title", "short": "t", "long": "title", "help": "Site title"}
-                ]
-            }),
-        ],
-    };
+        serde_json::json!({
+            "name": "preview", "about": "Preview workspace as local website with live reload",
+            "native_handler": "preview",
+            "args": [
+                {"name": "port", "short": "p", "long": "port", "default_value": "3456",
+                 "value_type": "Integer", "help": "HTTP port"},
+                {"name": "no-open", "long": "no-open", "is_flag": true, "help": "Don't auto-open browser"},
+                {"name": "audience", "short": "a", "long": "audience", "help": "Target audience"},
+                {"name": "title", "short": "t", "long": "title", "help": "Site title"}
+            ]
+        }),
+    ])
+    .requested_permissions(GuestRequestedPermissions {
+        defaults: serde_json::json!({
+            "read_files": { "include": ["all"], "exclude": [] },
+            "edit_files": { "include": ["all"], "exclude": [] },
+            "create_files": { "include": ["all"], "exclude": [] },
+            "http_requests": { "include": ["unpkg.com"], "exclude": [] },
+            "plugin_storage": { "include": ["all"], "exclude": [] }
+        }),
+        reasons: [
+            ("read_files".into(), "Read workspace entries and attachments while building export output.".into()),
+            ("edit_files".into(), "Update generated publish artifacts during export and preview workflows.".into()),
+            ("create_files".into(), "Create exported HTML, assets, and converted output files.".into()),
+            ("http_requests".into(), "Download optional converter WASM modules used for format conversion.".into()),
+            ("plugin_storage".into(), "Cache downloaded converter modules between runs.".into()),
+        ].into_iter().collect(),
+    });
 
     Ok(serde_json::to_string(&manifest)?)
 }
