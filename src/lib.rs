@@ -9,6 +9,7 @@ pub mod publish_plugin;
 pub mod state;
 
 use diaryx_plugin_sdk::prelude::*;
+use diaryx_plugin_sdk::protocol::ServerFunctionDecl;
 
 diaryx_plugin_sdk::register_getrandom_v02!();
 
@@ -89,6 +90,32 @@ pub fn manifest(_input: String) -> FnResult<String> {
                 {"name": "title", "short": "t", "long": "title", "help": "Site title"}
             ]
         }),
+    ])
+    .server_functions(vec![
+        ServerFunctionDecl {
+            name: "put_object".into(),
+            method: "PUT".into(),
+            path: "/namespaces/{id}/objects/{key}".into(),
+            description: "Upload a published HTML artifact or attachment to a namespace".into(),
+        },
+        ServerFunctionDecl {
+            name: "get_object".into(),
+            method: "GET".into(),
+            path: "/namespaces/{id}/objects/{key}".into(),
+            description: "Retrieve a workspace object (e.g. CRDT state or attachment)".into(),
+        },
+        ServerFunctionDecl {
+            name: "list_objects".into(),
+            method: "GET".into(),
+            path: "/namespaces/{id}/objects".into(),
+            description: "List object metadata in a namespace (used to prune stale artifacts)".into(),
+        },
+        ServerFunctionDecl {
+            name: "delete_object".into(),
+            method: "DELETE".into(),
+            path: "/namespaces/{id}/objects/{key}".into(),
+            description: "Delete a stale published artifact from a namespace".into(),
+        },
     ])
     .requested_permissions(GuestRequestedPermissions {
         defaults: serde_json::json!({
