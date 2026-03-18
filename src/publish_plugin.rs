@@ -28,8 +28,8 @@ use diaryx_core::plugin::{
     Plugin, PluginCapability, PluginContext, PluginError, PluginId, PluginManifest, UiContribution,
     WorkspaceOpenedEvent, WorkspacePlugin,
 };
-use diaryx_core::publish::body_renderer::BodyRenderer;
-use diaryx_core::publish::publish_format::PublishFormat;
+use crate::publish::body_renderer::BodyRenderer;
+use crate::publish::publish_format::PublishFormat;
 
 // ============================================================================
 // PublishPlugin struct
@@ -70,6 +70,10 @@ pub struct PublishPluginConfig {
     /// Per-audience publish state and access control settings.
     #[serde(default)]
     pub audience_states: std::collections::HashMap<String, AudiencePublishConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdomain: Option<String>,
 }
 
 /// Plugin that handles HTML export, audience filtering, and publishing.
@@ -111,14 +115,14 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
         Self::with_renderer_and_format(
             fs,
             body_renderer,
-            Arc::new(diaryx_core::publish::HtmlFormat),
+            Arc::new(crate::publish::HtmlFormat),
         )
     }
 
     /// Create a new PublishPlugin with the given filesystem, using the default
     /// HTML format and a noop body renderer.
     pub fn new(fs: FS) -> Self {
-        Self::with_renderer(fs, Arc::new(diaryx_core::publish::NoopBodyRenderer))
+        Self::with_renderer(fs, Arc::new(crate::publish::NoopBodyRenderer))
     }
 }
 
@@ -151,8 +155,7 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
                 let config = parsed
                     .frontmatter
                     .get("plugins")
-                    .and_then(|v| v.get("diaryx"))
-                    .and_then(|v| v.get("publish"))
+                    .and_then(|v| v.get("diaryx.publish"))
                     .and_then(|v| {
                         // Convert serde_yaml::Value to JSON then deserialize
                         serde_json::to_value(v)
@@ -185,17 +188,23 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
         let config = self.config.read().unwrap().clone();
         let config_yaml = serde_yaml::to_value(&config).map_err(DiaryxError::Yaml)?;
 
-        // Ensure plugins.diaryx.publish path exists in the IndexMap
+        // Store config under `plugins."diaryx.publish"` (dotted key, matching
+        // the canonical plugin ID used by the permissions system).
         let plugins_key = "plugins".to_string();
         let plugins_val = fm
             .entry(plugins_key)
             .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
         if let Some(plugins_map) = plugins_val.as_mapping_mut() {
-            let diaryx = plugins_map
-                .entry(serde_yaml::Value::String("diaryx".into()))
+            // Merge into existing "diaryx.publish" entry (preserves permissions).
+            let entry = plugins_map
+                .entry(serde_yaml::Value::String("diaryx.publish".into()))
                 .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-            if let Some(diaryx_map) = diaryx.as_mapping_mut() {
-                diaryx_map.insert(serde_yaml::Value::String("publish".into()), config_yaml);
+            if let (Some(existing), Some(config_map)) =
+                (entry.as_mapping_mut(), config_yaml.as_mapping())
+            {
+                for (k, v) in config_map {
+                    existing.insert(k.clone(), v.clone());
+                }
             }
         }
 
@@ -291,38 +300,28 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
         Ok(files)
     }
 
-    /// Export files as HTML (path extension changed, content still markdown for now).
+    /// Export files as rendered HTML via the publish pipeline.
     async fn export_to_html(
         &self,
         root_path: &Path,
         audience: &str,
     ) -> Result<Vec<ExportedFile>, DiaryxError> {
-        let default_aud = self.default_audience().await;
-        let plan = self
-            .exporter()
-            .plan_export(
-                root_path,
-                audience,
-                Path::new("/tmp/export"),
-                default_aud.as_deref(),
-            )
-            .await?;
-
-        let mut files = Vec::new();
-        for included in &plan.included {
-            if let Ok(content) = self.fs.read_to_string(&included.source_path).await {
-                let ext = self.format.output_extension();
-                let html_path = included
-                    .relative_path
-                    .to_string_lossy()
-                    .replace(".md", &format!(".{}", ext));
-                files.push(ExportedFile {
-                    path: html_path,
-                    content, // TODO: Add markdown-to-HTML conversion
-                });
-            }
-        }
-        Ok(files)
+        let options = crate::publish::PublishOptions {
+            audience: Some(audience.to_string()),
+            default_audience: self.default_audience().await,
+            ..Default::default()
+        };
+        let publisher =
+            crate::publish::Publisher::new(self.fs.clone(), &*self.body_renderer, &*self.format);
+        let rendered = publisher.render(root_path, &options).await?;
+        Ok(rendered
+            .into_iter()
+            .filter(|f| f.mime_type.starts_with("text/"))
+            .map(|f| ExportedFile {
+                path: f.path,
+                content: String::from_utf8_lossy(&f.content).to_string(),
+            })
+            .collect())
     }
 
     /// Collect binary attachment file paths from a workspace.
@@ -647,17 +646,18 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
                 let dest_path = PathBuf::from(destination);
 
                 let default_aud = self.default_audience().await;
-                let options = diaryx_core::publish::PublishOptions {
+                let options = crate::publish::PublishOptions {
                     single_file: params["single_file"].as_bool().unwrap_or(false),
                     title: params["title"].as_str().map(String::from),
                     audience: params["audience"].as_str().map(String::from),
                     force: params["force"].as_bool().unwrap_or(false),
                     copy_attachments: params["copy_attachments"].as_bool().unwrap_or(true),
                     default_audience: default_aud,
+                    ..Default::default()
                 };
 
                 let publisher =
-                    diaryx_core::publish::Publisher::new(self.fs.clone(), &*self.body_renderer, &*self.format);
+                    crate::publish::Publisher::new(self.fs.clone(), &*self.body_renderer, &*self.format);
                 let result = publisher
                     .publish(&resolved_root, &dest_path, &options)
                     .await
@@ -699,6 +699,26 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
                     serde_json::from_value(params["config"].clone())
                         .map_err(|e| PluginError::CommandError(format!("invalid config: {}", e)))?;
 
+                // Sync audience access level to the server if namespace is configured.
+                let server_url = params["server_url"].as_str().map(String::from);
+                let namespace_id = {
+                    let config = self.config.read().unwrap();
+                    config.namespace_id.clone()
+                };
+                if let (Some(server_url), Some(ns_id)) = (&server_url, &namespace_id) {
+                    let access = match state_config.state {
+                        AudienceAccessState::Public => "public",
+                        AudienceAccessState::AccessControl => "token",
+                        AudienceAccessState::Unpublished => "private",
+                    };
+                    // Best-effort: don't fail the whole command if server sync fails.
+                    if let Err(e) = crate::namespace_client::sync_audience(
+                        server_url, ns_id, &audience, access,
+                    ) {
+                        log::warn!("Failed to sync audience '{}' to server: {}", audience, e);
+                    }
+                }
+
                 {
                     let mut config = self.config.write().unwrap();
                     if state_config.state == AudienceAccessState::Unpublished {
@@ -724,6 +744,351 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
                 let config = self.config.read().unwrap().clone();
                 serde_json::to_value(&config.audience_states)
                     .map_err(|e| PluginError::CommandError(e.to_string()))
+            }
+
+            "PublishToNamespace" => {
+                let namespace_id = params["namespace_id"]
+                    .as_str()
+                    .ok_or_else(|| PluginError::CommandError("missing namespace_id".into()))?
+                    .to_string();
+
+                let workspace_root = match self.workspace_root.read().unwrap().clone() {
+                    Some(r) => r,
+                    None => {
+                        return Err(PluginError::CommandError(
+                            "no workspace root set".into(),
+                        ))
+                    }
+                };
+
+                let server_url = params["server_url"]
+                    .as_str()
+                    .map(String::from)
+                    .unwrap_or_default();
+
+                let config = self.config.read().unwrap().clone();
+                let default_aud = self.default_audience().await;
+
+                let mut audiences_published: Vec<String> = Vec::new();
+                let mut files_uploaded: usize = 0;
+                let mut files_deleted: usize = 0;
+
+                // Collect all audience names from config
+                let all_audiences: Vec<String> =
+                    config.audience_states.keys().cloned().collect();
+
+                for audience_name in &all_audiences {
+                    let audience_config = match config.audience_states.get(audience_name) {
+                        Some(c) => c,
+                        None => continue,
+                    };
+
+                    if audience_config.state == AudienceAccessState::Unpublished {
+                        // Delete objects for this audience
+                        match crate::namespace_client::list_objects(
+                            &server_url,
+                            &namespace_id,
+                        ) {
+                            Ok(objects) => {
+                                for obj in objects {
+                                    if obj.audience.as_deref() == Some(audience_name) {
+                                        let _ = crate::namespace_client::delete_object(
+                                            &server_url,
+                                            &namespace_id,
+                                            &obj.key,
+                                        );
+                                        files_deleted += 1;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to list objects for cleanup: {}", e);
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Determine access level
+                    let access = match audience_config.state {
+                        AudienceAccessState::Public => "public",
+                        AudienceAccessState::AccessControl => "token",
+                        AudienceAccessState::Unpublished => continue,
+                    };
+
+                    // Sync audience access level
+                    if let Err(e) = crate::namespace_client::sync_audience(
+                        &server_url,
+                        &namespace_id,
+                        audience_name,
+                        access,
+                    ) {
+                        return Err(PluginError::CommandError(format!(
+                            "failed to sync audience {}: {}",
+                            audience_name, e
+                        )));
+                    }
+
+                    // Render files for this audience
+                    let options = crate::publish::PublishOptions {
+                        audience: Some(audience_name.clone()),
+                        default_audience: default_aud.clone(),
+                        ..Default::default()
+                    };
+                    let publisher = crate::publish::Publisher::new(
+                        self.fs.clone(),
+                        &*self.body_renderer,
+                        &*self.format,
+                    );
+                    let rendered = publisher
+                        .render(&workspace_root, &options)
+                        .await
+                        .map_err(|e| PluginError::CommandError(e.to_string()))?;
+
+                    // Upload each rendered file
+                    let mut uploaded_keys: Vec<String> = Vec::new();
+                    for file in &rendered {
+                        let key = format!("{}/{}", audience_name, file.path);
+                        crate::namespace_client::put_object(
+                            &server_url,
+                            &namespace_id,
+                            &key,
+                            &file.content,
+                            &file.mime_type,
+                            audience_name,
+                        )
+                        .map_err(|e| {
+                            PluginError::CommandError(format!(
+                                "failed to upload {}: {}",
+                                file.path, e
+                            ))
+                        })?;
+                        uploaded_keys.push(key);
+                        files_uploaded += 1;
+                    }
+
+                    // Delete stale objects for this audience
+                    if let Ok(existing) = crate::namespace_client::list_objects(
+                        &server_url,
+                        &namespace_id,
+                    ) {
+                        for obj in existing {
+                            if obj.audience.as_deref() == Some(audience_name)
+                                && !uploaded_keys.contains(&obj.key)
+                            {
+                                let _ = crate::namespace_client::delete_object(
+                                    &server_url,
+                                    &namespace_id,
+                                    &obj.key,
+                                );
+                                files_deleted += 1;
+                            }
+                        }
+                    }
+
+                    audiences_published.push(audience_name.clone());
+                }
+
+                Ok(serde_json::json!({
+                    "audiences_published": audiences_published,
+                    "files_uploaded": files_uploaded,
+                    "files_deleted": files_deleted,
+                }))
+            }
+
+            "CreateNamespace" => {
+                let server_url = params["server_url"]
+                    .as_str()
+                    .ok_or_else(|| PluginError::CommandError("missing server_url".into()))?
+                    .to_string();
+                let id_param = params["id"].as_str();
+
+                let ns = crate::namespace_client::create_namespace(&server_url, id_param)
+                    .map_err(|e| PluginError::CommandError(format!("create namespace failed: {}", e)))?;
+
+                {
+                    let mut config = self.config.write().unwrap();
+                    config.namespace_id = Some(ns.id.clone());
+                }
+                self.save_config_to_frontmatter()
+                    .await
+                    .map_err(|e| PluginError::CommandError(e.to_string()))?;
+
+                Ok(serde_json::json!({ "namespace_id": ns.id }))
+            }
+
+            "CreateAccessToken" => {
+                let server_url = params["server_url"]
+                    .as_str()
+                    .ok_or_else(|| PluginError::CommandError("missing server_url".into()))?
+                    .to_string();
+                let audience = params["audience"]
+                    .as_str()
+                    .ok_or_else(|| PluginError::CommandError("missing audience".into()))?
+                    .to_string();
+
+                let namespace_id = {
+                    let config = self.config.read().unwrap();
+                    config.namespace_id.clone()
+                        .ok_or_else(|| PluginError::CommandError("no namespace_id configured".into()))?
+                };
+
+                let token_resp = crate::namespace_client::get_audience_token(
+                    &server_url,
+                    &namespace_id,
+                    &audience,
+                )
+                .map_err(|e| PluginError::CommandError(format!("get audience token failed: {}", e)))?;
+
+                let token = token_resp["token"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+
+                let subdomain = {
+                    let config = self.config.read().unwrap();
+                    config.subdomain.clone()
+                };
+                let access_url = if let Some(ref sub) = subdomain {
+                    format!(
+                        "https://{}.diaryx.org/{}/index.html?audience_token={}",
+                        sub,
+                        urlencoding::encode(&audience),
+                        urlencoding::encode(&token),
+                    )
+                } else {
+                    format!(
+                        "https://diaryx.org/ns/{}/{}/index.html?audience_token={}",
+                        namespace_id,
+                        urlencoding::encode(&audience),
+                        urlencoding::encode(&token),
+                    )
+                };
+
+                Ok(serde_json::json!({
+                    "token": token,
+                    "access_url": access_url,
+                }))
+            }
+
+            "SetCustomDomain" => {
+                let server_url = params["server_url"]
+                    .as_str()
+                    .ok_or_else(|| PluginError::CommandError("missing server_url".into()))?
+                    .to_string();
+                let domain = params["domain"]
+                    .as_str()
+                    .ok_or_else(|| PluginError::CommandError("missing domain".into()))?
+                    .to_string();
+                let audience_name = params["audience_name"]
+                    .as_str()
+                    .ok_or_else(|| PluginError::CommandError("missing audience_name".into()))?
+                    .to_string();
+
+                let namespace_id = {
+                    let config = self.config.read().unwrap();
+                    config.namespace_id.clone()
+                        .ok_or_else(|| PluginError::CommandError("no namespace_id configured".into()))?
+                };
+
+                let info = crate::namespace_client::register_domain(
+                    &server_url,
+                    &namespace_id,
+                    &domain,
+                    &audience_name,
+                )
+                .map_err(|e| PluginError::CommandError(format!("register domain failed: {}", e)))?;
+
+                serde_json::to_value(info).map_err(|e| PluginError::CommandError(e.to_string()))
+            }
+
+            "RemoveCustomDomain" => {
+                let server_url = params["server_url"]
+                    .as_str()
+                    .ok_or_else(|| PluginError::CommandError("missing server_url".into()))?
+                    .to_string();
+                let domain = params["domain"]
+                    .as_str()
+                    .ok_or_else(|| PluginError::CommandError("missing domain".into()))?
+                    .to_string();
+
+                let namespace_id = {
+                    let config = self.config.read().unwrap();
+                    config.namespace_id.clone()
+                        .ok_or_else(|| PluginError::CommandError("no namespace_id configured".into()))?
+                };
+
+                crate::namespace_client::remove_domain(
+                    &server_url,
+                    &namespace_id,
+                    &domain,
+                )
+                .map_err(|e| PluginError::CommandError(format!("remove domain failed: {}", e)))?;
+
+                Ok(serde_json::json!({ "ok": true }))
+            }
+
+            "ClaimSubdomain" => {
+                let server_url = params["server_url"]
+                    .as_str()
+                    .ok_or_else(|| PluginError::CommandError("missing server_url".into()))?
+                    .to_string();
+                let subdomain = params["subdomain"]
+                    .as_str()
+                    .ok_or_else(|| PluginError::CommandError("missing subdomain".into()))?
+                    .to_string();
+                let default_audience = params["default_audience"]
+                    .as_str()
+                    .map(String::from);
+
+                let namespace_id = {
+                    let config = self.config.read().unwrap();
+                    config.namespace_id.clone()
+                        .ok_or_else(|| PluginError::CommandError("no namespace_id configured".into()))?
+                };
+
+                let result = crate::namespace_client::claim_subdomain(
+                    &server_url,
+                    &namespace_id,
+                    &subdomain,
+                    default_audience.as_deref(),
+                )
+                .map_err(|e| PluginError::CommandError(e))?;
+
+                {
+                    let mut config = self.config.write().unwrap();
+                    config.subdomain = Some(subdomain);
+                }
+                self.save_config_to_frontmatter()
+                    .await
+                    .map_err(|e| PluginError::CommandError(e.to_string()))?;
+
+                Ok(result)
+            }
+
+            "ReleaseSubdomain" => {
+                let server_url = params["server_url"]
+                    .as_str()
+                    .ok_or_else(|| PluginError::CommandError("missing server_url".into()))?
+                    .to_string();
+
+                let namespace_id = {
+                    let config = self.config.read().unwrap();
+                    config.namespace_id.clone()
+                        .ok_or_else(|| PluginError::CommandError("no namespace_id configured".into()))?
+                };
+
+                crate::namespace_client::release_subdomain(&server_url, &namespace_id)
+                    .map_err(|e| PluginError::CommandError(e))?;
+
+                {
+                    let mut config = self.config.write().unwrap();
+                    config.subdomain = None;
+                }
+                self.save_config_to_frontmatter()
+                    .await
+                    .map_err(|e| PluginError::CommandError(e.to_string()))?;
+
+                Ok(serde_json::json!({ "ok": true }))
             }
 
             _ => Err(PluginError::CommandError(format!(

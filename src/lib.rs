@@ -5,6 +5,8 @@
 
 pub mod converter;
 pub mod host_fs;
+pub mod namespace_client;
+pub mod publish;
 pub mod publish_plugin;
 pub mod state;
 
@@ -116,6 +118,42 @@ pub fn manifest(_input: String) -> FnResult<String> {
             path: "/namespaces/{id}/objects/{key}".into(),
             description: "Delete a stale published artifact from a namespace".into(),
         },
+        ServerFunctionDecl {
+            name: "create_namespace".into(),
+            method: "POST".into(),
+            path: "/namespaces".into(),
+            description: "Create a new namespace for publishing".into(),
+        },
+        ServerFunctionDecl {
+            name: "get_audience_token".into(),
+            method: "GET".into(),
+            path: "/namespaces/{id}/audiences/{audience}/token".into(),
+            description: "Get an audience token for accessing token-protected content".into(),
+        },
+        ServerFunctionDecl {
+            name: "register_domain".into(),
+            method: "PUT".into(),
+            path: "/namespaces/{id}/domains/{domain}".into(),
+            description: "Register a custom domain for a namespace audience".into(),
+        },
+        ServerFunctionDecl {
+            name: "delete_domain".into(),
+            method: "DELETE".into(),
+            path: "/namespaces/{id}/domains/{domain}".into(),
+            description: "Remove a custom domain from a namespace".into(),
+        },
+        ServerFunctionDecl {
+            name: "claim_subdomain".into(),
+            method: "PUT".into(),
+            path: "/namespaces/{id}/subdomain".into(),
+            description: "Claim a subdomain for a namespace".into(),
+        },
+        ServerFunctionDecl {
+            name: "release_subdomain".into(),
+            method: "DELETE".into(),
+            path: "/namespaces/{id}/subdomain".into(),
+            description: "Release a subdomain from a namespace".into(),
+        },
     ])
     .requested_permissions(GuestRequestedPermissions {
         defaults: serde_json::json!({
@@ -146,16 +184,32 @@ pub fn init(input: String) -> FnResult<String> {
     state::init_state().map_err(extism_pdk::Error::msg)?;
 
     if let Some(root) = params.workspace_root {
+        let root_path = std::path::PathBuf::from(&root);
         let init_result = state::with_state(|s| {
             let ctx = PluginContext {
-                workspace_root: Some(std::path::PathBuf::from(root)),
+                workspace_root: Some(root_path.clone()),
                 link_format: diaryx_core::link_parser::LinkFormat::default(),
             };
             poll_future(diaryx_core::plugin::Plugin::init(&s.publish_plugin, &ctx))
         })
         .map_err(extism_pdk::Error::msg)?;
         init_result.map_err(extism_pdk::Error::msg)?;
+
+        // Trigger workspace_opened so load_config reads frontmatter.
+        // The browser host does not send a workspace_opened event, so
+        // we fire it here during init to ensure config is loaded.
+        let _ = state::with_state(|s| {
+            let event = diaryx_core::plugin::WorkspaceOpenedEvent {
+                workspace_root: root_path,
+            };
+            poll_future(diaryx_core::plugin::WorkspacePlugin::on_workspace_opened(
+                &s.publish_plugin,
+                &event,
+            ));
+        });
     }
+
+    converter::ensure_converter("pandoc");
 
     host::log::log("info", "Publish plugin initialized");
     Ok(String::new())
@@ -381,6 +435,13 @@ fn all_commands() -> Vec<String> {
         "SetPublishConfig",
         "GetAudiencePublishStates",
         "SetAudiencePublishState",
+        "PublishToNamespace",
+        "CreateNamespace",
+        "CreateAccessToken",
+        "SetCustomDomain",
+        "RemoveCustomDomain",
+        "ClaimSubdomain",
+        "ReleaseSubdomain",
     ]
     .into_iter()
     .map(String::from)

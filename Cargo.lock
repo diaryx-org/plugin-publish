@@ -360,7 +360,6 @@ dependencies = [
  "base64",
  "chrono",
  "chrono-english",
- "comrak",
  "dirs",
  "futures-lite",
  "glob",
@@ -396,9 +395,11 @@ version = "0.1.6"
 dependencies = [
  "async-trait",
  "base64",
+ "comrak",
  "diaryx_core",
  "diaryx_plugin_sdk",
  "extism-pdk",
+ "futures-lite",
  "getrandom 0.2.17",
  "indexmap",
  "log",
@@ -406,6 +407,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "urlencoding",
 ]
 
 [[package]]

@@ -17,6 +17,8 @@ use diaryx_plugin_sdk::host;
 
 const PANDOC_WASM_URL: &str = "https://unpkg.com/wasm-pandoc@1.0.0/src/pandoc.wasm";
 const PANDOC_STORAGE_KEY: &str = "converter:pandoc_wasm";
+/// Lightweight sentinel key — avoids loading the full WASM blob just to check existence.
+const PANDOC_READY_KEY: &str = "converter:pandoc_ready";
 
 // ============================================================================
 // Export format metadata
@@ -90,20 +92,22 @@ pub fn get_export_formats() -> Vec<ExportFormat> {
 // ============================================================================
 
 /// Check if a converter is available in plugin storage.
+///
+/// Uses a lightweight sentinel key so this doesn't load the full WASM blob.
 pub fn is_converter_available(name: &str) -> bool {
-    let key = match name {
-        "pandoc" => PANDOC_STORAGE_KEY,
+    let ready_key = match name {
+        "pandoc" => PANDOC_READY_KEY,
         _ => return false,
     };
-    host::storage::get(key)
+    host::storage::get(ready_key)
         .map(|v| v.is_some())
         .unwrap_or(false)
 }
 
 /// Download a converter WASM binary and store it in plugin storage.
 pub fn download_converter(name: &str) -> Result<(), String> {
-    let (url, key) = match name {
-        "pandoc" => (PANDOC_WASM_URL, PANDOC_STORAGE_KEY),
+    let (url, key, ready_key) = match name {
+        "pandoc" => (PANDOC_WASM_URL, PANDOC_STORAGE_KEY, PANDOC_READY_KEY),
         _ => return Err(format!("Unknown converter: {name}")),
     };
 
@@ -127,12 +131,25 @@ pub fn download_converter(name: &str) -> Result<(), String> {
         response.body.into_bytes()
     };
     host::storage::set(key, &wasm_bytes)?;
+    // Write a lightweight sentinel so is_converter_available doesn't load the full blob.
+    host::storage::set(ready_key, b"1")?;
 
     host::log::log(
         "info",
         &format!("Downloaded {name} WASM ({} bytes)", wasm_bytes.len()),
     );
     Ok(())
+}
+
+/// Ensure a converter is available, downloading it if needed.
+///
+/// Called during plugin init to pre-cache the converter WASM.
+pub fn ensure_converter(name: &str) {
+    if !is_converter_available(name) {
+        if let Err(e) = download_converter(name) {
+            host::log::log("warn", &format!("Failed to download {name} on init: {e}"));
+        }
+    }
 }
 
 // ============================================================================
@@ -146,9 +163,9 @@ pub fn convert_format(
     to: &str,
     resources: Option<&HashMap<String, String>>,
 ) -> Result<ConvertResult, String> {
-    // Ensure pandoc is available
+    // Ensure pandoc is available, downloading on demand if needed
     if !is_converter_available("pandoc") {
-        return Err("Pandoc converter not available. Call DownloadConverter first.".into());
+        download_converter("pandoc")?;
     }
 
     // Build pandoc arguments

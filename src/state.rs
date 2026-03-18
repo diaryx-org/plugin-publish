@@ -10,7 +10,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use serde_yaml::Value as YamlValue;
 
-use diaryx_core::publish::BodyRenderer;
+use crate::publish::BodyRenderer;
 use diaryx_plugin_sdk::host;
 use crate::publish_plugin::PublishPlugin;
 
