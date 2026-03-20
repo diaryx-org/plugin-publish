@@ -118,42 +118,6 @@ pub fn manifest(_input: String) -> FnResult<String> {
             path: "/namespaces/{id}/objects/{key}".into(),
             description: "Delete a stale published artifact from a namespace".into(),
         },
-        ServerFunctionDecl {
-            name: "create_namespace".into(),
-            method: "POST".into(),
-            path: "/namespaces".into(),
-            description: "Create a new namespace for publishing".into(),
-        },
-        ServerFunctionDecl {
-            name: "get_audience_token".into(),
-            method: "GET".into(),
-            path: "/namespaces/{id}/audiences/{audience}/token".into(),
-            description: "Get an audience token for accessing token-protected content".into(),
-        },
-        ServerFunctionDecl {
-            name: "register_domain".into(),
-            method: "PUT".into(),
-            path: "/namespaces/{id}/domains/{domain}".into(),
-            description: "Register a custom domain for a namespace audience".into(),
-        },
-        ServerFunctionDecl {
-            name: "delete_domain".into(),
-            method: "DELETE".into(),
-            path: "/namespaces/{id}/domains/{domain}".into(),
-            description: "Remove a custom domain from a namespace".into(),
-        },
-        ServerFunctionDecl {
-            name: "claim_subdomain".into(),
-            method: "PUT".into(),
-            path: "/namespaces/{id}/subdomain".into(),
-            description: "Claim a subdomain for a namespace".into(),
-        },
-        ServerFunctionDecl {
-            name: "release_subdomain".into(),
-            method: "DELETE".into(),
-            path: "/namespaces/{id}/subdomain".into(),
-            description: "Release a subdomain from a namespace".into(),
-        },
     ])
     .requested_permissions(GuestRequestedPermissions {
         defaults: serde_json::json!({
@@ -436,12 +400,6 @@ fn all_commands() -> Vec<String> {
         "GetAudiencePublishStates",
         "SetAudiencePublishState",
         "PublishToNamespace",
-        "CreateNamespace",
-        "CreateAccessToken",
-        "SetCustomDomain",
-        "RemoveCustomDomain",
-        "ClaimSubdomain",
-        "ReleaseSubdomain",
     ]
     .into_iter()
     .map(String::from)

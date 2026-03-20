@@ -379,8 +379,6 @@ dependencies = [
 [[package]]
 name = "diaryx_plugin_sdk"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88cfc6f922513485bca8ed999bc70dbf46095e93eadee2387e7a05eb503e9e97"
 dependencies = [
  "base64",
  "extism-pdk",

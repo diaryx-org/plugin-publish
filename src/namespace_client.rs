@@ -2,6 +2,13 @@
 //!
 //! All requests go through `host::http::request_binary()`, so auth tokens
 //! are added transparently by the host runtime for same-domain requests.
+//!
+//! Note: `put_object`, `delete_object`, `list_objects`, and `sync_audience`
+//! are now handled by `host::namespace` in publish_plugin.rs. These functions
+//! are retained for potential CLI usage but are no longer called from the
+//! plugin dispatch path.
+
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 
