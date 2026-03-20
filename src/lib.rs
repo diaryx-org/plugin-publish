@@ -1,9 +1,8 @@
-//! Extism guest plugin for publish/export features.
+//! Extism guest plugin for HTML publishing features.
 //!
 //! This crate compiles to a `.wasm` plugin loaded by `diaryx_extism` on native
 //! and by `@extism/extism` in the web app.
 
-pub mod converter;
 pub mod host_fs;
 pub mod namespace_client;
 pub mod publish;
@@ -35,25 +34,18 @@ pub fn manifest(_input: String) -> FnResult<String> {
         },
     };
 
-    let palette_export = UiContribution::CommandPaletteItem {
-        id: "publish-export".into(),
-        label: "Export...".into(),
-        group: Some("Publish".into()),
-        plugin_command: "OpenExportDialog".into(),
-    };
-
     let pm = PluginManifest {
         id: PluginId("diaryx.publish".into()),
         name: "Publish".into(),
         version: env!("CARGO_PKG_VERSION").into(),
-        description: "Export and publish content with optional format conversion".into(),
+        description: "HTML rendering and website publishing".into(),
         capabilities: vec![
             PluginCapability::WorkspaceEvents,
             PluginCapability::CustomCommands {
                 commands: all_commands(),
             },
         ],
-        ui: vec![sidebar, palette_export],
+        ui: vec![sidebar],
         cli: vec![],
     };
 
@@ -123,16 +115,12 @@ pub fn manifest(_input: String) -> FnResult<String> {
         defaults: serde_json::json!({
             "read_files": { "include": ["all"], "exclude": [] },
             "edit_files": { "include": ["all"], "exclude": [] },
-            "create_files": { "include": ["all"], "exclude": [] },
-            "http_requests": { "include": ["unpkg.com"], "exclude": [] },
-            "plugin_storage": { "include": ["all"], "exclude": [] }
+            "create_files": { "include": ["all"], "exclude": [] }
         }),
         reasons: [
-            ("read_files".into(), "Read workspace entries and attachments while building export output.".into()),
-            ("edit_files".into(), "Update generated publish artifacts during export and preview workflows.".into()),
-            ("create_files".into(), "Create exported HTML, assets, and converted output files.".into()),
-            ("http_requests".into(), "Download optional converter WASM modules used for format conversion.".into()),
-            ("plugin_storage".into(), "Cache downloaded converter modules between runs.".into()),
+            ("read_files".into(), "Read workspace entries and attachments for publishing.".into()),
+            ("edit_files".into(), "Update publish config in workspace frontmatter.".into()),
+            ("create_files".into(), "Create published HTML output files.".into()),
         ].into_iter().collect(),
     });
 
@@ -173,8 +161,6 @@ pub fn init(input: String) -> FnResult<String> {
         });
     }
 
-    converter::ensure_converter("pandoc");
-
     host::log::log("info", "Publish plugin initialized");
     Ok(String::new())
 }
@@ -197,95 +183,19 @@ pub fn shutdown(_input: String) -> FnResult<String> {
 pub fn handle_command(input: String) -> FnResult<String> {
     let req: CommandRequest = serde_json::from_str(&input)?;
 
-    let response = match req.command.as_str() {
-        "ConvertFormat" => {
-            let content = req
-                .params
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let from = req
-                .params
-                .get("from")
-                .and_then(|v| v.as_str())
-                .unwrap_or("markdown");
-            let to = req
-                .params
-                .get("to")
-                .and_then(|v| v.as_str())
-                .unwrap_or("html");
-            let resources: Option<std::collections::HashMap<String, String>> = req
-                .params
-                .get("resources")
-                .cloned()
-                .and_then(|v| serde_json::from_value(v).ok());
+    let result = state::with_state(|s| {
+        poll_future(diaryx_core::plugin::WorkspacePlugin::handle_command(
+            &s.publish_plugin,
+            &req.command,
+            req.params,
+        ))
+    });
 
-            match converter::convert_format(content, from, to, resources.as_ref()) {
-                Ok(result) => CommandResponse::ok(serde_json::to_value(result).unwrap_or_default()),
-                Err(e) => CommandResponse::err(e),
-            }
-        }
-        "ConvertToPdf" => {
-            let content = req
-                .params
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let from = req
-                .params
-                .get("from")
-                .and_then(|v| v.as_str())
-                .unwrap_or("markdown");
-            let resources: Option<std::collections::HashMap<String, String>> = req
-                .params
-                .get("resources")
-                .cloned()
-                .and_then(|v| serde_json::from_value(v).ok());
-
-            match converter::convert_format(content, from, "pdf", resources.as_ref()) {
-                Ok(result) => CommandResponse::ok(serde_json::to_value(result).unwrap_or_default()),
-                Err(e) => CommandResponse::err(e),
-            }
-        }
-        "DownloadConverter" => {
-            let name = req
-                .params
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("pandoc");
-            match converter::download_converter(name) {
-                Ok(()) => CommandResponse::ok(serde_json::json!({ "ok": true })),
-                Err(e) => CommandResponse::err(e),
-            }
-        }
-        "IsConverterAvailable" => {
-            let name = req
-                .params
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("pandoc");
-            let available = converter::is_converter_available(name);
-            CommandResponse::ok(serde_json::json!({ "available": available }))
-        }
-        "GetExportFormats" => CommandResponse::ok(
-            serde_json::to_value(converter::get_export_formats()).unwrap_or_default(),
-        ),
-        _ => {
-            let result = state::with_state(|s| {
-                poll_future(diaryx_core::plugin::WorkspacePlugin::handle_command(
-                    &s.publish_plugin,
-                    &req.command,
-                    req.params,
-                ))
-            });
-
-            match result {
-                Ok(Some(Ok(data))) => CommandResponse::ok(data),
-                Ok(Some(Err(e))) => CommandResponse::err(e.to_string()),
-                Ok(None) => CommandResponse::err(format!("Unknown command: {}", req.command)),
-                Err(e) => CommandResponse::err(e),
-            }
-        }
+    let response = match result {
+        Ok(Some(Ok(data))) => CommandResponse::ok(data),
+        Ok(Some(Err(e))) => CommandResponse::err(e.to_string()),
+        Ok(None) => CommandResponse::err(format!("Unknown command: {}", req.command)),
+        Err(e) => CommandResponse::err(e),
     };
 
     Ok(serde_json::to_string(&response)?)
@@ -384,22 +294,13 @@ pub fn execute_typed_command(input: String) -> FnResult<String> {
 
 fn all_commands() -> Vec<String> {
     [
-        "PlanExport",
-        "ExportToMemory",
-        "ExportToHtml",
-        "ExportBinaryAttachments",
-        "GetExportFormats",
-        "DownloadConverter",
-        "IsConverterAvailable",
-        "ConvertFormat",
-        "ConvertToPdf",
-        "OpenExportDialog",
         "OpenPublishPanel",
         "GetPublishConfig",
         "SetPublishConfig",
         "GetAudiencePublishStates",
         "SetAudiencePublishState",
         "PublishToNamespace",
+        "PublishWorkspace",
     ]
     .into_iter()
     .map(String::from)

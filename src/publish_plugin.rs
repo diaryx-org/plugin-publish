@@ -12,16 +12,13 @@
 //!     .register_workspace_plugin(Arc::new(plugin));
 //! ```
 
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 
-use diaryx_core::command::{BinaryFileInfo, ExportedFile};
 use diaryx_core::error::DiaryxError;
-use diaryx_core::export::Exporter;
 use diaryx_core::fs::AsyncFileSystem;
 use diaryx_core::link_parser::LinkFormat;
 use diaryx_core::plugin::{
@@ -132,16 +129,12 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
 
 impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
     /// Resolve a workspace-relative path against the workspace root.
+    #[allow(dead_code)]
     fn resolve_path(&self, path: &str) -> PathBuf {
         match self.workspace_root.read().unwrap().as_ref() {
             Some(root) => root.join(path),
             None => PathBuf::from(path),
         }
-    }
-
-    /// Create an Exporter using our filesystem.
-    fn exporter(&self) -> Exporter<FS> {
-        Exporter::new(self.fs.clone())
     }
 
     /// Load publish plugin config from root frontmatter `plugins.diaryx.publish`.
@@ -223,203 +216,6 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
             .and_then(|c| c.default_audience)
     }
 
-    /// Export files to memory as markdown, with body template rendering.
-    async fn export_to_memory(
-        &self,
-        root_path: &Path,
-        audience: &str,
-    ) -> Result<Vec<ExportedFile>, DiaryxError> {
-        log::debug!(
-            "[PublishPlugin] ExportToMemory starting - root_path: {:?}, audience: {:?}",
-            root_path,
-            audience
-        );
-
-        let default_aud = self.default_audience().await;
-        let plan = self
-            .exporter()
-            .plan_export(
-                root_path,
-                audience,
-                Path::new("/tmp/export"),
-                default_aud.as_deref(),
-            )
-            .await?;
-
-        log::debug!(
-            "[PublishPlugin] plan_export returned {} included files",
-            plan.included.len()
-        );
-
-        let mut files = Vec::new();
-        for included in &plan.included {
-            match self.fs.read_to_string(&included.source_path).await {
-                Ok(content) => {
-                    // When exporting for a specific audience, render body templates
-                    // so {{#for-audience}} blocks resolve. For "all" (*), leave raw.
-                    let content = if audience != "*" && self.body_renderer.has_templates(&content) {
-                        match diaryx_core::frontmatter::parse_or_empty(&content) {
-                            Ok(parsed) => {
-                                let rendered = self
-                                    .body_renderer
-                                    .render_body(
-                                        &parsed.body,
-                                        &parsed.frontmatter,
-                                        &included.source_path,
-                                        Some(root_path),
-                                        Some(audience),
-                                    )
-                                    .unwrap_or_else(|_| parsed.body.clone());
-                                diaryx_core::frontmatter::serialize(&parsed.frontmatter, &rendered)
-                                    .unwrap_or(content)
-                            }
-                            Err(_) => content,
-                        }
-                    } else {
-                        content
-                    };
-
-                    files.push(ExportedFile {
-                        path: included.relative_path.to_string_lossy().to_string(),
-                        content,
-                    });
-                }
-                Err(e) => {
-                    log::warn!(
-                        "[PublishPlugin] read failed: {:?} - {}",
-                        included.source_path,
-                        e
-                    );
-                }
-            }
-        }
-        log::debug!(
-            "[PublishPlugin] ExportToMemory returning {} files",
-            files.len()
-        );
-        Ok(files)
-    }
-
-    /// Export files as rendered HTML via the publish pipeline.
-    async fn export_to_html(
-        &self,
-        root_path: &Path,
-        audience: &str,
-    ) -> Result<Vec<ExportedFile>, DiaryxError> {
-        let options = crate::publish::PublishOptions {
-            audience: Some(audience.to_string()),
-            default_audience: self.default_audience().await,
-            ..Default::default()
-        };
-        let publisher =
-            crate::publish::Publisher::new(self.fs.clone(), &*self.body_renderer, &*self.format);
-        let rendered = publisher.render(root_path, &options).await?;
-        Ok(rendered
-            .into_iter()
-            .filter(|f| f.mime_type.starts_with("text/"))
-            .map(|f| ExportedFile {
-                path: f.path,
-                content: String::from_utf8_lossy(&f.content).to_string(),
-            })
-            .collect())
-    }
-
-    /// Collect binary attachment file paths from a workspace.
-    async fn export_binary_attachments(&self, root_path: &Path) -> Vec<BinaryFileInfo> {
-        let root_dir = root_path.parent().unwrap_or(root_path);
-
-        log::info!(
-            "[PublishPlugin] ExportBinaryAttachments starting - root_path: {:?}, root_dir: {:?}",
-            root_path,
-            root_dir
-        );
-
-        let mut attachments = Vec::new();
-        let mut visited_dirs = HashSet::new();
-        self.collect_binaries_recursive(root_dir, root_dir, &mut attachments, &mut visited_dirs)
-            .await;
-
-        log::info!(
-            "[PublishPlugin] ExportBinaryAttachments returning {} attachment paths",
-            attachments.len()
-        );
-        attachments
-    }
-
-    async fn collect_binaries_recursive(
-        &self,
-        dir: &Path,
-        root_dir: &Path,
-        attachments: &mut Vec<BinaryFileInfo>,
-        visited_dirs: &mut HashSet<PathBuf>,
-    ) {
-        if visited_dirs.contains(dir) {
-            return;
-        }
-        visited_dirs.insert(dir.to_path_buf());
-
-        // Skip hidden directories
-        if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with('.') {
-                return;
-            }
-        }
-
-        let entries = match self.fs.list_files(dir).await {
-            Ok(e) => e,
-            Err(e) => {
-                log::warn!("[PublishPlugin] list_files failed for {:?}: {}", dir, e);
-                return;
-            }
-        };
-
-        for entry_path in entries {
-            // Skip hidden files/dirs
-            if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with('.') {
-                    continue;
-                }
-            }
-
-            if self.fs.is_dir(&entry_path).await {
-                Box::pin(self.collect_binaries_recursive(
-                    &entry_path,
-                    root_dir,
-                    attachments,
-                    visited_dirs,
-                ))
-                .await;
-            } else if is_binary_file(&entry_path) {
-                let relative_path = pathdiff::diff_paths(&entry_path, root_dir)
-                    .unwrap_or_else(|| entry_path.clone());
-                attachments.push(BinaryFileInfo {
-                    source_path: entry_path.to_string_lossy().to_string(),
-                    relative_path: relative_path.to_string_lossy().to_string(),
-                });
-            }
-        }
-    }
-}
-
-/// Check if a file is a binary attachment (not markdown/text).
-fn is_binary_file(path: &Path) -> bool {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase());
-
-    match ext.as_deref() {
-        // Text/markdown files - not binary
-        Some("md" | "txt" | "json" | "yaml" | "yml" | "toml") => false,
-        // Common binary formats
-        Some(
-            "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" | "bmp" | "pdf" | "heic"
-            | "heif" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "mp3" | "mp4" | "wav"
-            | "ogg" | "flac" | "m4a" | "aac" | "mov" | "avi" | "mkv" | "webm" | "zip" | "tar"
-            | "gz" | "rar" | "7z" | "ttf" | "otf" | "woff" | "woff2" | "sqlite" | "db",
-        ) => true,
-        _ => false,
-    }
 }
 
 // ============================================================================
@@ -436,12 +232,8 @@ fn publish_plugin_manifest() -> PluginManifest {
             PluginCapability::WorkspaceEvents,
             PluginCapability::CustomCommands {
                 commands: vec![
-                    "ExportToHtml".into(),
-                    "ExportToMemory".into(),
-                    "PlanExport".into(),
-                    "ExportBinaryAttachments".into(),
-                    "GetExportFormats".into(),
                     "PublishWorkspace".into(),
+                    "PublishToNamespace".into(),
                     "GetPublishConfig".into(),
                     "SetPublishConfig".into(),
                     "GetAudiencePublishStates".into(),
@@ -473,18 +265,6 @@ fn publish_plugin_manifest() -> PluginManifest {
                     },
                     diaryx_core::plugin::SettingsField::HostWidget {
                         widget_id: "namespace.publish-button".into(),
-                    },
-                    diaryx_core::plugin::SettingsField::Section {
-                        label: "Export".into(),
-                        description: Some(
-                            "Export this workspace to markdown, HTML, or converter-based formats."
-                                .into(),
-                        ),
-                    },
-                    diaryx_core::plugin::SettingsField::HostActionButton {
-                        label: "Export Workspace".into(),
-                        action_type: "open-export-dialog".into(),
-                        variant: Some("outline".into()),
                     },
                 ],
             },
@@ -578,76 +358,6 @@ impl<FS: AsyncFileSystem + Clone + 'static> WorkspacePlugin for PublishPlugin<FS
 impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
     async fn dispatch(&self, cmd: &str, params: JsonValue) -> Result<JsonValue, PluginError> {
         match cmd {
-            "PlanExport" => {
-                let root_path = params["root_path"]
-                    .as_str()
-                    .ok_or_else(|| PluginError::CommandError("missing root_path".into()))?;
-                let audience = params["audience"].as_str().unwrap_or("*");
-                let resolved = self.resolve_path(root_path);
-                let default_aud = self.default_audience().await;
-                let plan = self
-                    .exporter()
-                    .plan_export(
-                        &resolved,
-                        audience,
-                        Path::new("/tmp/export"),
-                        default_aud.as_deref(),
-                    )
-                    .await
-                    .map_err(|e| PluginError::CommandError(e.to_string()))?;
-                serde_json::to_value(plan).map_err(|e| PluginError::CommandError(e.to_string()))
-            }
-
-            "ExportToMemory" => {
-                let root_path = params["root_path"]
-                    .as_str()
-                    .ok_or_else(|| PluginError::CommandError("missing root_path".into()))?;
-                let audience = params["audience"].as_str().unwrap_or("*");
-                let resolved = self.resolve_path(root_path);
-                let files = self
-                    .export_to_memory(&resolved, audience)
-                    .await
-                    .map_err(|e| PluginError::CommandError(e.to_string()))?;
-                serde_json::to_value(files).map_err(|e| PluginError::CommandError(e.to_string()))
-            }
-
-            "ExportToHtml" => {
-                let root_path = params["root_path"]
-                    .as_str()
-                    .ok_or_else(|| PluginError::CommandError("missing root_path".into()))?;
-                let audience = params["audience"].as_str().unwrap_or("*");
-                let resolved = self.resolve_path(root_path);
-                let files = self
-                    .export_to_html(&resolved, audience)
-                    .await
-                    .map_err(|e| PluginError::CommandError(e.to_string()))?;
-                serde_json::to_value(files).map_err(|e| PluginError::CommandError(e.to_string()))
-            }
-
-            "ExportBinaryAttachments" => {
-                let root_path = params["root_path"]
-                    .as_str()
-                    .ok_or_else(|| PluginError::CommandError("missing root_path".into()))?;
-                let resolved = self.resolve_path(root_path);
-                let attachments = self.export_binary_attachments(&resolved).await;
-                serde_json::to_value(attachments)
-                    .map_err(|e| PluginError::CommandError(e.to_string()))
-            }
-
-            "GetExportFormats" => {
-                let formats = serde_json::json!([
-                    { "id": "markdown", "label": "Markdown", "extension": ".md", "binary": false, "requiresConverter": false },
-                    { "id": "html", "label": "HTML", "extension": ".html", "binary": false, "requiresConverter": false },
-                    { "id": "pdf", "label": "PDF", "extension": ".pdf", "binary": true, "requiresConverter": true },
-                    { "id": "docx", "label": "Word (DOCX)", "extension": ".docx", "binary": true, "requiresConverter": true },
-                    { "id": "epub", "label": "EPUB", "extension": ".epub", "binary": true, "requiresConverter": true },
-                    { "id": "latex", "label": "LaTeX", "extension": ".tex", "binary": false, "requiresConverter": true },
-                    { "id": "odt", "label": "OpenDocument (ODT)", "extension": ".odt", "binary": true, "requiresConverter": true },
-                    { "id": "rst", "label": "reStructuredText", "extension": ".rst", "binary": false, "requiresConverter": true },
-                ]);
-                Ok(formats)
-            }
-
             #[cfg(not(target_arch = "wasm32"))]
             "PublishWorkspace" => {
                 let workspace_root = params["workspace_root"]
@@ -939,33 +649,13 @@ mod tests {
         assert_eq!(icon.as_deref(), Some("globe"));
         match component {
             diaryx_core::plugin::ComponentRef::Declarative { fields } => {
-                // First field should be the publish site panel widget
                 assert!(matches!(
                     &fields[0],
                     diaryx_core::plugin::SettingsField::HostWidget { widget_id }
-                        if widget_id == "publish.site-panel"
+                        if widget_id == "namespace.guard"
                 ));
-                assert!(fields.iter().any(|field| matches!(
-                    field,
-                    diaryx_core::plugin::SettingsField::HostActionButton { action_type, .. }
-                        if action_type == "open-export-dialog"
-                )));
             }
             other => panic!("expected declarative component, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn test_get_export_formats() {
-        let plugin = create_test_plugin();
-        let result = block_on(plugin.dispatch("GetExportFormats", serde_json::json!({})));
-        assert!(result.is_ok());
-        let formats = result.unwrap();
-        assert!(formats.is_array());
-        let arr = formats.as_array().unwrap();
-        assert_eq!(arr.len(), 8);
-        assert_eq!(arr[0]["id"], "markdown");
-        assert_eq!(arr[1]["id"], "html");
-        assert_eq!(arr[2]["id"], "pdf");
     }
 }
