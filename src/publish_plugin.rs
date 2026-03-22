@@ -12,7 +12,7 @@
 //!     .register_workspace_plugin(Arc::new(plugin));
 //! ```
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
@@ -112,7 +112,7 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
         Self::with_renderer_and_format(
             fs,
             body_renderer,
-            Arc::new(crate::publish::HtmlFormat),
+            Arc::new(crate::publish::HtmlFormat::new()),
         )
     }
 
@@ -216,6 +216,77 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
             .and_then(|c| c.default_audience)
     }
 
+    /// Load the workspace's theme and return an `HtmlFormat` configured with it.
+    ///
+    /// Reads `.diaryx/themes/settings.json` (for `presetId`) and
+    /// `.diaryx/themes/library.json` (for theme definitions). If the theme
+    /// files don't exist or the preset isn't found, returns the default format.
+    async fn format_with_workspace_theme(&self) -> Arc<dyn PublishFormat> {
+        let workspace_dir = match self.workspace_root.read().unwrap().clone() {
+            Some(root) => {
+                // workspace_root is the root file path; go up to the directory
+                root.parent().map(|p| p.to_path_buf()).unwrap_or(root)
+            }
+            None => return self.format.clone(),
+        };
+
+        let theme = match self.load_workspace_theme(&workspace_dir).await {
+            Some(t) => t,
+            None => return self.format.clone(),
+        };
+
+        Arc::new(crate::publish::HtmlFormat::with_theme(theme))
+    }
+
+    /// Try to load a `PublishTheme` from workspace appearance files.
+    async fn load_workspace_theme(
+        &self,
+        workspace_dir: &Path,
+    ) -> Option<crate::publish::PublishTheme> {
+        // Read theme settings (which preset is selected)
+        let settings_path = workspace_dir.join(".diaryx/themes/settings.json");
+        let settings_str = self.fs.read_to_string(&settings_path).await.ok()?;
+        let settings: serde_json::Value = serde_json::from_str(&settings_str).ok()?;
+        let preset_id = settings.get("presetId")?.as_str()?;
+
+        // Read theme library (full theme definitions)
+        let library_path = workspace_dir.join(".diaryx/themes/library.json");
+        let library_str = self.fs.read_to_string(&library_path).await.ok()?;
+        let library: Vec<serde_json::Value> = serde_json::from_str(&library_str).ok()?;
+
+        // Find the theme definition matching the preset ID
+        let theme_def = library.iter().find_map(|entry| {
+            let theme = entry.get("theme")?;
+            let id = theme.get("id")?.as_str()?;
+            if id == preset_id {
+                Some(theme)
+            } else {
+                None
+            }
+        })?;
+
+        // Extract light and dark palettes as HashMaps
+        let colors = theme_def.get("colors")?;
+        let light = Self::json_to_color_map(colors.get("light")?);
+        let dark = Self::json_to_color_map(colors.get("dark")?);
+
+        Some(crate::publish::PublishTheme::from_app_palette(&light, &dark))
+    }
+
+    /// Convert a JSON object of color keys to a HashMap.
+    fn json_to_color_map(
+        palette: &serde_json::Value,
+    ) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        if let Some(obj) = palette.as_object() {
+            for (key, value) in obj {
+                if let Some(v) = value.as_str() {
+                    map.insert(key.clone(), v.to_string());
+                }
+            }
+        }
+        map
+    }
 }
 
 // ============================================================================
@@ -250,21 +321,30 @@ fn publish_plugin_manifest() -> PluginManifest {
                 fields: vec![
                     diaryx_core::plugin::SettingsField::HostWidget {
                         widget_id: "namespace.guard".into(),
+                        sign_in_action: Some(diaryx_core::plugin::HostAction {
+                            action_type: "open-settings".into(),
+                            payload: Some(serde_json::json!({ "tab": "account" })),
+                        }),
                     },
                     diaryx_core::plugin::SettingsField::HostWidget {
                         widget_id: "namespace.site-url".into(),
+                        sign_in_action: None,
                     },
                     diaryx_core::plugin::SettingsField::HostWidget {
                         widget_id: "namespace.subdomain".into(),
+                        sign_in_action: None,
                     },
                     diaryx_core::plugin::SettingsField::HostWidget {
                         widget_id: "namespace.custom-domains".into(),
+                        sign_in_action: None,
                     },
                     diaryx_core::plugin::SettingsField::HostWidget {
                         widget_id: "namespace.audiences".into(),
+                        sign_in_action: None,
                     },
                     diaryx_core::plugin::SettingsField::HostWidget {
                         widget_id: "namespace.publish-button".into(),
+                        sign_in_action: None,
                     },
                 ],
             },
@@ -381,8 +461,9 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
                     ..Default::default()
                 };
 
+                let format = self.format_with_workspace_theme().await;
                 let publisher =
-                    crate::publish::Publisher::new(self.fs.clone(), &*self.body_renderer, &*self.format);
+                    crate::publish::Publisher::new(self.fs.clone(), &*self.body_renderer, &*format);
                 let result = publisher
                     .publish(&resolved_root, &dest_path, &options)
                     .await
@@ -487,10 +568,12 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
 
                 let config = self.config.read().unwrap().clone();
                 let default_aud = self.default_audience().await;
+                let format = self.format_with_workspace_theme().await;
 
                 let mut audiences_published: Vec<String> = Vec::new();
                 let mut files_uploaded: usize = 0;
                 let mut files_deleted: usize = 0;
+                let mut stale_audiences: Vec<String> = Vec::new();
 
                 // Collect all audience names from config
                 let all_audiences: Vec<String> =
@@ -553,12 +636,22 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
                     let publisher = crate::publish::Publisher::new(
                         self.fs.clone(),
                         &*self.body_renderer,
-                        &*self.format,
+                        &*format,
                     );
-                    let rendered = publisher
-                        .render(&workspace_root, &options)
+                    let (rendered, attachment_paths) = publisher
+                        .render_with_attachments(&workspace_root, &options)
                         .await
                         .map_err(|e| PluginError::CommandError(e.to_string()))?;
+
+                    // No entries have this audience tag — remove from config
+                    if rendered.is_empty() {
+                        log::info!(
+                            "Removing stale audience '{}' from publish config: no entries have this tag",
+                            audience_name,
+                        );
+                        stale_audiences.push(audience_name.clone());
+                        continue;
+                    }
 
                     // Upload each rendered file
                     let mut uploaded_keys: Vec<String> = Vec::new();
@@ -581,6 +674,41 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
                         files_uploaded += 1;
                     }
 
+                    // Upload attachments (images, PDFs, etc.)
+                    for (src_path, dest_rel) in &attachment_paths {
+                        let key = format!("{}/{}", audience_name, dest_rel.display());
+                        match diaryx_plugin_sdk::host::fs::read_binary(
+                            &src_path.to_string_lossy(),
+                        ) {
+                            Ok(bytes) => {
+                                let mime = mime_type_from_ext(dest_rel);
+                                diaryx_plugin_sdk::host::namespace::put_object(
+                                    &namespace_id,
+                                    &key,
+                                    &bytes,
+                                    &mime,
+                                    audience_name,
+                                )
+                                .map_err(|e| {
+                                    PluginError::CommandError(format!(
+                                        "failed to upload attachment {}: {}",
+                                        dest_rel.display(),
+                                        e
+                                    ))
+                                })?;
+                                uploaded_keys.push(key);
+                                files_uploaded += 1;
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "Skipping attachment {}: {}",
+                                    src_path.display(),
+                                    e
+                                );
+                            }
+                        }
+                    }
+
                     // Delete stale objects for this audience
                     if let Ok(existing) = diaryx_plugin_sdk::host::namespace::list_objects(
                         &namespace_id,
@@ -601,6 +729,20 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
                     audiences_published.push(audience_name.clone());
                 }
 
+                // Remove stale audiences from config and persist
+                if !stale_audiences.is_empty() {
+                    {
+                        let mut config = self.config.write().unwrap();
+                        for name in &stale_audiences {
+                            config.audience_states.remove(name);
+                            config.public_audiences.retain(|a| a != name);
+                        }
+                    }
+                    if let Err(e) = self.save_config_to_frontmatter().await {
+                        log::warn!("Failed to persist stale audience cleanup: {}", e);
+                    }
+                }
+
                 Ok(serde_json::json!({
                     "audiences_published": audiences_published,
                     "files_uploaded": files_uploaded,
@@ -614,6 +756,32 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
             ))),
         }
     }
+}
+
+/// Infer MIME type from a file extension. Falls back to `application/octet-stream`.
+fn mime_type_from_ext(path: &Path) -> String {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("svg") => "image/svg+xml",
+        Some("webp") => "image/webp",
+        Some("pdf") => "application/pdf",
+        Some("ico") => "image/x-icon",
+        Some("mp4") => "video/mp4",
+        Some("webm") => "video/webm",
+        Some("mp3") => "audio/mpeg",
+        Some("woff2") => "font/woff2",
+        Some("woff") => "font/woff",
+        Some("ttf") => "font/ttf",
+        _ => "application/octet-stream",
+    }
+    .to_string()
 }
 
 #[cfg(test)]
@@ -651,7 +819,7 @@ mod tests {
             diaryx_core::plugin::ComponentRef::Declarative { fields } => {
                 assert!(matches!(
                     &fields[0],
-                    diaryx_core::plugin::SettingsField::HostWidget { widget_id }
+                    diaryx_core::plugin::SettingsField::HostWidget { widget_id, .. }
                         if widget_id == "namespace.guard"
                 ));
             }

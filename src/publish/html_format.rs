@@ -12,10 +12,48 @@ use diaryx_core::frontmatter;
 use diaryx_core::link_parser;
 
 use super::publish_format::PublishFormat;
-use super::types::{NavLink, PublishOptions, PublishedPage, SiteNavNode, SiteNavigation};
+use super::types::{NavLink, PublishOptions, PublishTheme, PublishedPage, SiteNavNode, SiteNavigation};
 
 /// HTML output format backed by comrak.
-pub struct HtmlFormat;
+///
+/// Optionally holds a [`PublishTheme`] to override the default CSS color variables.
+pub struct HtmlFormat {
+    theme: Option<PublishTheme>,
+}
+
+impl HtmlFormat {
+    /// Create a new HtmlFormat with default styling.
+    pub fn new() -> Self {
+        Self { theme: None }
+    }
+
+    /// Create a new HtmlFormat with a theme that overrides default colors.
+    pub fn with_theme(theme: PublishTheme) -> Self {
+        Self { theme: Some(theme) }
+    }
+
+    /// Get the CSS stylesheet, optionally with theme overrides appended.
+    fn css(&self) -> String {
+        let base = get_base_css();
+        match &self.theme {
+            Some(theme) => {
+                let overrides = theme.to_css_overrides();
+                if overrides.is_empty() {
+                    base.to_string()
+                } else {
+                    format!("{}\n/* ── Theme overrides ── */\n{}", base, overrides)
+                }
+            }
+            None => base.to_string(),
+        }
+    }
+}
+
+impl Default for HtmlFormat {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl PublishFormat for HtmlFormat {
     fn output_extension(&self) -> &str {
@@ -102,7 +140,7 @@ impl PublishFormat for HtmlFormat {
     fn render_page(&self, page: &PublishedPage, site_title: &str, single_file: bool) -> String {
         let prefix = root_prefix(&page.dest_filename);
         let css_link = if single_file {
-            format!("<style>{}</style>", get_css())
+            format!("<style>{}</style>", self.css())
         } else {
             format!(r#"<link rel="stylesheet" href="{}style.css">"#, prefix)
         };
@@ -237,7 +275,7 @@ impl PublishFormat for HtmlFormat {
 </body>
 </html>"#,
             site_title = html_escape(site_title),
-            css = get_css(),
+            css = self.css(),
             toc = toc,
             sections = sections.join("\n<hr>\n"),
         )
@@ -254,7 +292,7 @@ impl PublishFormat for HtmlFormat {
     ) -> String {
         let prefix = root_prefix(&page.dest_filename);
         let css_link = if single_file {
-            format!("<style>{}</style>", get_css())
+            format!("<style>{}</style>", self.css())
         } else {
             format!(r#"<link rel="stylesheet" href="{}style.css">"#, prefix)
         };
@@ -423,7 +461,7 @@ impl PublishFormat for HtmlFormat {
     }
 
     fn static_assets(&self) -> Vec<(String, Vec<u8>)> {
-        vec![("style.css".to_string(), get_css().as_bytes().to_vec())]
+        vec![("style.css".to_string(), self.css().into_bytes())]
     }
 }
 
@@ -1352,8 +1390,8 @@ fn xml_escape(s: &str) -> String {
 // CSS
 // ============================================================================
 
-/// Get the built-in CSS stylesheet.
-fn get_css() -> &'static str {
+/// Get the built-in base CSS stylesheet (without theme overrides).
+fn get_base_css() -> &'static str {
     include_str!("html_format_css.css")
 }
 
@@ -1527,7 +1565,7 @@ mod tests {
 
     #[test]
     fn test_supplementary_files_with_base_url() {
-        let format = HtmlFormat;
+        let format = HtmlFormat::new();
         let root = make_page("index.html", "Home", true, indexmap::IndexMap::new());
         let leaf = make_page("post.html", "Post", false, indexmap::IndexMap::new());
 
@@ -1549,7 +1587,7 @@ mod tests {
 
     #[test]
     fn test_supplementary_files_without_base_url() {
-        let format = HtmlFormat;
+        let format = HtmlFormat::new();
         let options = PublishOptions::default();
         let files = format.supplementary_files(&[], &options);
         assert!(files.is_empty());
@@ -1557,7 +1595,7 @@ mod tests {
 
     #[test]
     fn test_supplementary_files_seo_only() {
-        let format = HtmlFormat;
+        let format = HtmlFormat::new();
         let root = make_page("index.html", "Home", true, indexmap::IndexMap::new());
 
         let options = PublishOptions {
@@ -1590,5 +1628,140 @@ mod tests {
         let html = "<p>Hello <strong>world</strong>, this is a test.</p>";
         let result = strip_html_truncate(html, 11);
         assert_eq!(result, "Hello world");
+    }
+
+    #[test]
+    fn test_publish_theme_css_overrides() {
+        use crate::publish::types::{PublishColorPalette, PublishTheme};
+
+        let theme = PublishTheme {
+            id: Some("test".into()),
+            light: PublishColorPalette {
+                bg: Some("oklch(1 0 0)".into()),
+                text: Some("oklch(0.2 0 0)".into()),
+                accent: Some("oklch(0.5 0.2 250)".into()),
+                ..Default::default()
+            },
+            dark: PublishColorPalette {
+                bg: Some("oklch(0.1 0 0)".into()),
+                text: Some("oklch(0.9 0 0)".into()),
+                ..Default::default()
+            },
+        };
+
+        let css = theme.to_css_overrides();
+        assert!(css.contains("--bg: oklch(1 0 0)"));
+        assert!(css.contains("--text: oklch(0.2 0 0)"));
+        assert!(css.contains("--accent: oklch(0.5 0.2 250)"));
+        assert!(css.contains("prefers-color-scheme: dark"));
+        assert!(css.contains("--bg: oklch(0.1 0 0)"));
+        assert!(css.contains("--text: oklch(0.9 0 0)"));
+    }
+
+    #[test]
+    fn test_publish_theme_empty_no_overrides() {
+        use crate::publish::types::PublishTheme;
+
+        let theme = PublishTheme::default();
+        let css = theme.to_css_overrides();
+        assert!(css.is_empty());
+    }
+
+    #[test]
+    fn test_html_format_with_theme_includes_overrides() {
+        use crate::publish::types::{PublishColorPalette, PublishTheme};
+
+        let theme = PublishTheme {
+            id: Some("custom".into()),
+            light: PublishColorPalette {
+                bg: Some("#ff0000".into()),
+                ..Default::default()
+            },
+            dark: Default::default(),
+        };
+
+        let format = HtmlFormat::with_theme(theme);
+        let css = format.css();
+
+        // Should contain the base CSS
+        assert!(css.contains("body {"));
+        // Should contain the theme override
+        assert!(css.contains("Theme overrides"));
+        assert!(css.contains("--bg: #ff0000"));
+    }
+
+    #[test]
+    fn test_html_format_default_no_overrides() {
+        let format = HtmlFormat::new();
+        let css = format.css();
+
+        assert!(css.contains("body {"));
+        assert!(!css.contains("Theme overrides"));
+    }
+
+    #[test]
+    fn test_html_format_with_theme_renders_themed_page() {
+        use crate::publish::types::{PublishColorPalette, PublishTheme};
+
+        let theme = PublishTheme {
+            id: None,
+            light: PublishColorPalette {
+                bg: Some("oklch(0.98 0 0)".into()),
+                ..Default::default()
+            },
+            dark: Default::default(),
+        };
+
+        let format = HtmlFormat::with_theme(theme);
+        let page = make_page("index.html", "Home", true, indexmap::IndexMap::new());
+        let html = format.render_page(&page, "Test Site", true);
+
+        // Inline CSS should include the theme override
+        assert!(html.contains("--bg: oklch(0.98 0 0)"));
+    }
+
+    #[test]
+    fn test_publish_theme_from_app_palette() {
+        use crate::publish::types::PublishTheme;
+
+        let mut light = std::collections::HashMap::new();
+        light.insert("background".into(), "oklch(1 0 0)".into());
+        light.insert("foreground".into(), "oklch(0.1 0 0)".into());
+        light.insert("primary".into(), "oklch(0.5 0.2 250)".into());
+        light.insert("muted-foreground".into(), "oklch(0.6 0 0)".into());
+        light.insert("border".into(), "oklch(0.9 0 0)".into());
+
+        let dark = std::collections::HashMap::new();
+
+        let theme = PublishTheme::from_app_palette(&light, &dark);
+
+        assert_eq!(theme.light.bg.as_deref(), Some("oklch(1 0 0)"));
+        assert_eq!(theme.light.text.as_deref(), Some("oklch(0.1 0 0)"));
+        assert_eq!(theme.light.accent.as_deref(), Some("oklch(0.5 0.2 250)"));
+        assert_eq!(theme.light.text_muted.as_deref(), Some("oklch(0.6 0 0)"));
+        assert_eq!(theme.light.border.as_deref(), Some("oklch(0.9 0 0)"));
+        assert!(theme.dark.bg.is_none());
+    }
+
+    #[test]
+    fn test_themed_static_assets_include_overrides() {
+        use crate::publish::types::{PublishColorPalette, PublishTheme};
+
+        let theme = PublishTheme {
+            id: None,
+            light: PublishColorPalette {
+                accent: Some("hotpink".into()),
+                ..Default::default()
+            },
+            dark: Default::default(),
+        };
+
+        let format = HtmlFormat::with_theme(theme);
+        let assets = format.static_assets();
+
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].0, "style.css");
+        let css = String::from_utf8(assets[0].1.clone()).unwrap();
+        assert!(css.contains("--accent: hotpink"));
     }
 }

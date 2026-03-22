@@ -146,6 +146,102 @@ impl<'a, FS: AsyncFileSystem + Clone> Publisher<'a, FS> {
         Ok(rendered_files)
     }
 
+    /// Render workspace files and collect attachment paths in one pass.
+    ///
+    /// Returns `(rendered_files, attachment_pairs)` where each attachment pair
+    /// is `(source_absolute_path, dest_relative_path)`.
+    pub async fn render_with_attachments(
+        &self,
+        workspace_root: &Path,
+        options: &PublishOptions,
+    ) -> Result<(Vec<RenderedFile>, Vec<(PathBuf, PathBuf)>)> {
+        let pages = if let Some(ref audience) = options.audience {
+            self.collect_with_audience(
+                workspace_root,
+                Path::new("/tmp/render"),
+                audience,
+                options.default_audience.as_deref(),
+            )
+            .await?
+        } else {
+            self.collect_all(workspace_root).await?
+        };
+
+        if pages.is_empty() {
+            return Ok((vec![], vec![]));
+        }
+
+        let attachment_paths = Self::collect_attachment_paths(&pages, workspace_root);
+
+        let site_title = options.title.clone().unwrap_or_else(|| {
+            pages
+                .first()
+                .map(|p| p.title.clone())
+                .unwrap_or_else(|| "Journal".to_string())
+        });
+
+        let nav_tree = build_site_nav_tree(&pages);
+        let mut rendered_files = Vec::new();
+
+        for page in &pages {
+            let nav = nav_for_page(&nav_tree, &page.dest_filename, &pages);
+            let seo_meta = self.format.render_seo_meta(page, &site_title, options);
+            let feed_links = self.format.render_feed_links(page);
+            let rendered = self.format.render_page_with_context(
+                page,
+                &site_title,
+                false,
+                &nav,
+                &seo_meta,
+                &feed_links,
+            );
+
+            let mime_type = match self.format.output_extension() {
+                "html" => "text/html",
+                "xml" => "application/xml",
+                _ => "text/plain",
+            };
+
+            rendered_files.push(RenderedFile {
+                path: page.dest_filename.clone(),
+                content: rendered.into_bytes(),
+                mime_type: mime_type.to_string(),
+            });
+        }
+
+        for (filename, content) in self.format.supplementary_files(&pages, options) {
+            let mime_type = if filename.ends_with(".xml") {
+                "application/xml"
+            } else if filename.ends_with(".txt") {
+                "text/plain"
+            } else {
+                "application/octet-stream"
+            };
+            rendered_files.push(RenderedFile {
+                path: filename,
+                content,
+                mime_type: mime_type.to_string(),
+            });
+        }
+
+        for (filename, content) in self.format.static_assets() {
+            let mime_type = if filename.ends_with(".css") {
+                "text/css"
+            } else if filename.ends_with(".js") {
+                "application/javascript"
+            } else {
+                "application/octet-stream"
+            };
+            rendered_files.push(RenderedFile {
+                path: filename,
+                content,
+                mime_type: mime_type.to_string(),
+            });
+        }
+
+        Ok((rendered_files, attachment_paths))
+    }
+
     /// Publish a workspace to HTML
     /// Only available on native platforms (not WASM) since it writes to the filesystem
     #[cfg(not(target_arch = "wasm32"))]
@@ -581,8 +677,7 @@ impl<'a, FS: AsyncFileSystem + Clone> Publisher<'a, FS> {
     /// PDFs, etc.) and the frontmatter `attachments` list. Returns
     /// deduplicated pairs of `(source_absolute_path, dest_relative_path)`.
     /// Markdown files are excluded since they become HTML pages.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn collect_attachment_paths(
+    pub fn collect_attachment_paths(
         pages: &[PublishedPage],
         workspace_dir: &Path,
     ) -> Vec<(PathBuf, PathBuf)> {
@@ -904,7 +999,6 @@ pub fn nav_for_page(
 /// Finds references inside markdown link/image syntax `[...](...)`
 /// and HTML attributes `src="..."` / `href="..."`. Excludes external
 /// URLs, anchors, and data/javascript URIs.
-#[cfg(not(target_arch = "wasm32"))]
 fn extract_local_file_refs(markdown: &str) -> Vec<String> {
     let mut paths = Vec::new();
 
@@ -945,7 +1039,6 @@ fn extract_local_file_refs(markdown: &str) -> Vec<String> {
 
 /// Returns true if a path looks like a local file reference (not an external
 /// URL, anchor, or special URI scheme).
-#[cfg(not(target_arch = "wasm32"))]
 fn is_local_file_ref(path: &str) -> bool {
     if path.is_empty() {
         return false;
@@ -1018,7 +1111,7 @@ mod tests {
     fn test_transform_links_no_corruption() {
         use super::super::html_format::HtmlFormat;
 
-        let format = HtmlFormat;
+        let format = HtmlFormat::new();
         let workspace_dir = Path::new("/tmp/workspace");
         let current_path = workspace_dir.join("family.md");
         let mut path_to_filename = HashMap::new();
@@ -1199,7 +1292,7 @@ mod tests {
 
         let async_fs = diaryx_core::fs::SyncToAsyncFs::new(fs.clone());
         let renderer = super::super::body_renderer::NoopBodyRenderer;
-        let format = HtmlFormat;
+        let format = HtmlFormat::new();
         let publisher = Publisher::new(async_fs, &renderer, &format);
         let dest = Path::new("/output");
 

@@ -18,8 +18,8 @@ use extism_pdk::*;
 use serde_json::Value as JsonValue;
 
 use diaryx_core::plugin::{
-    ComponentRef, PluginCapability, PluginContext, PluginId, PluginManifest, SidebarSide,
-    UiContribution,
+    ComponentRef, HostAction, PluginCapability, PluginContext, PluginId, PluginManifest,
+    SettingsField, SidebarSide, UiContribution,
 };
 
 #[plugin_fn]
@@ -29,8 +29,21 @@ pub fn manifest(_input: String) -> FnResult<String> {
         label: "Publish".into(),
         icon: Some("send".into()),
         side: SidebarSide::Left,
-        component: ComponentRef::Builtin {
-            component_id: "publish.panel".into(),
+        component: ComponentRef::Declarative {
+            fields: vec![
+                SettingsField::HostWidget {
+                    widget_id: "namespace.guard".into(),
+                    sign_in_action: Some(HostAction {
+                        action_type: "open-settings".into(),
+                        payload: Some(serde_json::json!({ "tab": "account" })),
+                    }),
+                },
+                SettingsField::HostWidget { widget_id: "namespace.site-url".into(), sign_in_action: None },
+                SettingsField::HostWidget { widget_id: "namespace.subdomain".into(), sign_in_action: None },
+                SettingsField::HostWidget { widget_id: "namespace.custom-domains".into(), sign_in_action: None },
+                SettingsField::HostWidget { widget_id: "namespace.audiences".into(), sign_in_action: None },
+                SettingsField::HostWidget { widget_id: "namespace.publish-button".into(), sign_in_action: None },
+            ],
         },
     };
 
