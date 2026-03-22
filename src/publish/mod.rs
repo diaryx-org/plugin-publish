@@ -5,6 +5,7 @@
 
 pub mod body_renderer;
 pub mod content_provider;
+pub mod email_format;
 pub mod fs_content_provider;
 pub mod html_format;
 pub mod publish_format;
