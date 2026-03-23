@@ -96,7 +96,10 @@ pub fn put_object(
     let resp = host::http::request_binary("PUT", &url, &headers, bytes)?;
 
     if resp.status >= 400 {
-        return Err(format!("PUT object {} returned status {}", key, resp.status));
+        return Err(format!(
+            "PUT object {} returned status {}",
+            key, resp.status
+        ));
     }
     Ok(())
 }
@@ -140,10 +143,7 @@ pub fn delete_object(server_url: &str, namespace_id: &str, key: &str) -> Result<
 
 /// Create a new namespace, optionally with a specific ID.
 pub fn create_namespace(server_url: &str, id: Option<&str>) -> Result<NamespaceInfo, String> {
-    let url = format!(
-        "{}/namespaces",
-        server_url.trim_end_matches('/')
-    );
+    let url = format!("{}/namespaces", server_url.trim_end_matches('/'));
     let body = match id {
         Some(id) => serde_json::json!({ "id": id }),
         None => serde_json::json!({}),
@@ -216,11 +216,7 @@ pub fn register_domain(
 }
 
 /// Remove a custom domain from a namespace.
-pub fn remove_domain(
-    server_url: &str,
-    namespace_id: &str,
-    domain: &str,
-) -> Result<(), String> {
+pub fn remove_domain(server_url: &str, namespace_id: &str, domain: &str) -> Result<(), String> {
     let url = format!(
         "{}/namespaces/{}/domains/{}",
         server_url.trim_end_matches('/'),
@@ -275,10 +271,7 @@ pub fn claim_subdomain(
 }
 
 /// Release a subdomain from a namespace.
-pub fn release_subdomain(
-    server_url: &str,
-    namespace_id: &str,
-) -> Result<(), String> {
+pub fn release_subdomain(server_url: &str, namespace_id: &str) -> Result<(), String> {
     let url = format!(
         "{}/namespaces/{}/subdomain",
         server_url.trim_end_matches('/'),

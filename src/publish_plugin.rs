@@ -18,6 +18,8 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 
+use crate::publish::body_renderer::BodyRenderer;
+use crate::publish::publish_format::PublishFormat;
 use diaryx_core::error::DiaryxError;
 use diaryx_core::fs::AsyncFileSystem;
 use diaryx_core::link_parser::LinkFormat;
@@ -25,8 +27,6 @@ use diaryx_core::plugin::{
     Plugin, PluginCapability, PluginContext, PluginError, PluginId, PluginManifest, UiContribution,
     WorkspaceOpenedEvent, WorkspacePlugin,
 };
-use crate::publish::body_renderer::BodyRenderer;
-use crate::publish::publish_format::PublishFormat;
 
 // ============================================================================
 // PublishPlugin struct
@@ -54,6 +54,16 @@ pub struct AudiencePublishConfig {
     /// Access control method when state is `AccessControl` (e.g. "access-key").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_method: Option<String>,
+    /// Whether to send an email digest when publishing to this audience.
+    #[serde(default)]
+    pub email_on_publish: bool,
+    /// Email subject template. Supports `{title}` placeholder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_subject: Option<String>,
+    /// Path to a cover file (markdown) that renders as a personalized intro
+    /// above the entry digest in emails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_cover: Option<String>,
 }
 
 /// Configuration for the publish plugin, stored in root frontmatter at
@@ -71,6 +81,13 @@ pub struct PublishPluginConfig {
     pub namespace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subdomain: Option<String>,
+    /// Server's site base URL for direct serving (e.g. "http://localhost:3030").
+    /// Written by the UI when it fetches server capabilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_base_url: Option<String>,
+    /// Domain for subdomain-based routing (e.g. "diaryx.org").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_domain: Option<String>,
 }
 
 /// Plugin that handles HTML export, audience filtering, and publishing.
@@ -216,6 +233,160 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
             .and_then(|c| c.default_audience)
     }
 
+    /// Render an email digest for an audience and trigger server-side send.
+    ///
+    /// 1. Renders cover file (if configured) + entry digest as email HTML
+    /// 2. Uploads the draft to `_email_draft/{audience}.html` in the object store
+    /// 3. Calls the host's `send_audience_email` to trigger batch sending
+    async fn render_and_send_email(
+        &self,
+        namespace_id: &str,
+        audience_name: &str,
+        audience_config: &AudiencePublishConfig,
+        workspace_root: &Path,
+        _rendered_pages: &[crate::publish::RenderedFile],
+        format: &dyn crate::publish::PublishFormat,
+    ) -> Result<(), String> {
+        let default_aud = self.default_audience().await;
+
+        // Collect pages with clean rendered_body (no page wrappers/frontmatter)
+        let options = crate::publish::PublishOptions {
+            audience: Some(audience_name.to_string()),
+            default_audience: default_aud,
+            ..Default::default()
+        };
+        let publisher =
+            crate::publish::Publisher::new(self.fs.clone(), &*self.body_renderer, format);
+        let pages = publisher
+            .collect_pages(workspace_root, &options)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Filter to non-root, non-index pages (actual content entries)
+        let content_pages: Vec<&crate::publish::PublishedPage> = pages
+            .iter()
+            .filter(|p| !p.is_root && !p.contents_links.is_empty() == false)
+            .filter(|p| !p.is_root)
+            .collect();
+
+        if content_pages.is_empty() && audience_config.email_cover.is_none() {
+            return Err("No entries to email and no cover file configured".into());
+        }
+
+        // Read and render cover file if configured (strip frontmatter first)
+        let cover_html = if let Some(cover_path) = &audience_config.email_cover {
+            let cover_full_path = workspace_root
+                .parent()
+                .unwrap_or(workspace_root)
+                .join(cover_path);
+            match self.fs.read_to_string(&cover_full_path).await {
+                Ok(raw) => {
+                    // Strip frontmatter before rendering
+                    let body = match diaryx_core::frontmatter::parse_or_empty(&raw) {
+                        Ok(parsed) => parsed.body,
+                        Err(_) => raw,
+                    };
+                    let preprocessed = format.preprocess_body(&body);
+                    Some(format.convert_body(&preprocessed))
+                }
+                Err(e) => {
+                    log::warn!("Failed to read email cover file '{}': {}", cover_path, e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Load theme for email rendering
+        let workspace_dir = workspace_root
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| workspace_root.to_path_buf());
+        let theme = self.load_workspace_theme(&workspace_dir).await;
+
+        // Resolve site title from workspace root entry (same as publisher)
+        let site_title = pages
+            .first()
+            .map(|p| p.title.clone())
+            .unwrap_or_else(|| "Newsletter".into());
+
+        // Base URL: prefer subdomain+domain, fall back to site_base_url direct serving
+        let base_url = {
+            let config = self.config.read().unwrap();
+            if let (Some(sub), Some(domain)) = (&config.subdomain, &config.site_domain) {
+                Some(format!(
+                    "https://{}.{}/{}/index.html",
+                    sub, domain, audience_name
+                ))
+            } else if let Some(site_base) = &config.site_base_url {
+                config.namespace_id.as_ref().map(|ns_id| {
+                    format!(
+                        "{}/sites/{}/{}/index.html",
+                        site_base.trim_end_matches('/'),
+                        ns_id,
+                        audience_name
+                    )
+                })
+            } else {
+                None
+            }
+        };
+
+        // Resolve email subject
+        let subject = audience_config
+            .email_subject
+            .as_deref()
+            .unwrap_or("{title} — New posts")
+            .replace("{title}", &site_title);
+
+        // Only include entry digest when a site is published (has a URL to link to).
+        // Otherwise, send only the cover file content.
+        let pages_for_email: Vec<crate::publish::PublishedPage> = if base_url.is_some() {
+            content_pages.into_iter().cloned().collect()
+        } else {
+            vec![]
+        };
+
+        // Render the email
+        let email_options = crate::publish::email_format::EmailDigestOptions {
+            cover_html: cover_html.as_deref(),
+            site_title: &site_title,
+            base_url: base_url.as_deref(),
+            unsubscribe_url: "{unsubscribe_url}",
+            theme: theme.as_ref(),
+        };
+        let email_html =
+            crate::publish::email_format::render_email_digest(&pages_for_email, &email_options);
+
+        // Upload draft to object store
+        let draft_key = format!("_email_draft/{}.html", audience_name);
+        diaryx_plugin_sdk::host::namespace::put_object(
+            namespace_id,
+            &draft_key,
+            email_html.as_bytes(),
+            "text/html",
+            audience_name,
+        )
+        .map_err(|e| format!("Failed to upload email draft: {}", e))?;
+
+        // Trigger server-side send
+        diaryx_plugin_sdk::host::namespace::send_audience_email(
+            namespace_id,
+            audience_name,
+            &subject,
+            None,
+        )
+        .map_err(|e| format!("Failed to send email: {}", e))?;
+
+        log::info!(
+            "Email sent to audience '{}' ({} entries)",
+            audience_name,
+            pages.len()
+        );
+        Ok(())
+    }
+
     /// Load the workspace's theme and return an `HtmlFormat` configured with it.
     ///
     /// Reads `.diaryx/themes/settings.json` (for `presetId`) and
@@ -258,11 +429,7 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
         let theme_def = library.iter().find_map(|entry| {
             let theme = entry.get("theme")?;
             let id = theme.get("id")?.as_str()?;
-            if id == preset_id {
-                Some(theme)
-            } else {
-                None
-            }
+            if id == preset_id { Some(theme) } else { None }
         })?;
 
         // Extract light and dark palettes as HashMaps
@@ -270,13 +437,13 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
         let light = Self::json_to_color_map(colors.get("light")?);
         let dark = Self::json_to_color_map(colors.get("dark")?);
 
-        Some(crate::publish::PublishTheme::from_app_palette(&light, &dark))
+        Some(crate::publish::PublishTheme::from_app_palette(
+            &light, &dark,
+        ))
     }
 
     /// Convert a JSON object of color keys to a HashMap.
-    fn json_to_color_map(
-        palette: &serde_json::Value,
-    ) -> std::collections::HashMap<String, String> {
+    fn json_to_color_map(palette: &serde_json::Value) -> std::collections::HashMap<String, String> {
         let mut map = std::collections::HashMap::new();
         if let Some(obj) = palette.as_object() {
             for (key, value) in obj {
@@ -309,6 +476,7 @@ fn publish_plugin_manifest() -> PluginManifest {
                     "SetPublishConfig".into(),
                     "GetAudiencePublishStates".into(),
                     "SetAudiencePublishState".into(),
+                    "SendEmailToAudience".into(),
                 ],
             },
         ],
@@ -517,9 +685,9 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
                         AudienceAccessState::Unpublished => "private",
                     };
                     // Best-effort: don't fail the whole command if server sync fails.
-                    if let Err(e) = diaryx_plugin_sdk::host::namespace::sync_audience(
-                        ns_id, &audience, access,
-                    ) {
+                    if let Err(e) =
+                        diaryx_plugin_sdk::host::namespace::sync_audience(ns_id, &audience, access)
+                    {
                         log::warn!("Failed to sync audience '{}' to server: {}", audience, e);
                     }
                 }
@@ -559,11 +727,7 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
 
                 let workspace_root = match self.workspace_root.read().unwrap().clone() {
                     Some(r) => r,
-                    None => {
-                        return Err(PluginError::CommandError(
-                            "no workspace root set".into(),
-                        ))
-                    }
+                    None => return Err(PluginError::CommandError("no workspace root set".into())),
                 };
 
                 let config = self.config.read().unwrap().clone();
@@ -576,8 +740,7 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
                 let mut stale_audiences: Vec<String> = Vec::new();
 
                 // Collect all audience names from config
-                let all_audiences: Vec<String> =
-                    config.audience_states.keys().cloned().collect();
+                let all_audiences: Vec<String> = config.audience_states.keys().cloned().collect();
 
                 for audience_name in &all_audiences {
                     let audience_config = match config.audience_states.get(audience_name) {
@@ -587,9 +750,7 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
 
                     if audience_config.state == AudienceAccessState::Unpublished {
                         // Delete objects for this audience
-                        match diaryx_plugin_sdk::host::namespace::list_objects(
-                            &namespace_id,
-                        ) {
+                        match diaryx_plugin_sdk::host::namespace::list_objects(&namespace_id) {
                             Ok(objects) => {
                                 for obj in objects {
                                     if obj.audience.as_deref() == Some(audience_name) {
@@ -677,9 +838,8 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
                     // Upload attachments (images, PDFs, etc.)
                     for (src_path, dest_rel) in &attachment_paths {
                         let key = format!("{}/{}", audience_name, dest_rel.display());
-                        match diaryx_plugin_sdk::host::fs::read_binary(
-                            &src_path.to_string_lossy(),
-                        ) {
+                        match diaryx_plugin_sdk::host::fs::read_binary(&src_path.to_string_lossy())
+                        {
                             Ok(bytes) => {
                                 let mime = mime_type_from_ext(dest_rel);
                                 diaryx_plugin_sdk::host::namespace::put_object(
@@ -700,19 +860,15 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
                                 files_uploaded += 1;
                             }
                             Err(e) => {
-                                log::warn!(
-                                    "Skipping attachment {}: {}",
-                                    src_path.display(),
-                                    e
-                                );
+                                log::warn!("Skipping attachment {}: {}", src_path.display(), e);
                             }
                         }
                     }
 
                     // Delete stale objects for this audience
-                    if let Ok(existing) = diaryx_plugin_sdk::host::namespace::list_objects(
-                        &namespace_id,
-                    ) {
+                    if let Ok(existing) =
+                        diaryx_plugin_sdk::host::namespace::list_objects(&namespace_id)
+                    {
                         for obj in existing {
                             if obj.audience.as_deref() == Some(audience_name)
                                 && !uploaded_keys.contains(&obj.key)
@@ -727,6 +883,23 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
                     }
 
                     audiences_published.push(audience_name.clone());
+
+                    // Email on publish: render and send email digest
+                    if audience_config.email_on_publish {
+                        if let Err(e) = self
+                            .render_and_send_email(
+                                &namespace_id,
+                                audience_name,
+                                audience_config,
+                                &workspace_root,
+                                &rendered,
+                                &*format,
+                            )
+                            .await
+                        {
+                            log::warn!("Email send for audience '{}' failed: {}", audience_name, e);
+                        }
+                    }
                 }
 
                 // Remove stale audiences from config and persist
@@ -748,6 +921,44 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
                     "files_uploaded": files_uploaded,
                     "files_deleted": files_deleted,
                 }))
+            }
+
+            "SendEmailToAudience" => {
+                let namespace_id = params["namespace_id"]
+                    .as_str()
+                    .ok_or_else(|| PluginError::CommandError("missing namespace_id".into()))?
+                    .to_string();
+                let audience_name = params["audience"]
+                    .as_str()
+                    .ok_or_else(|| PluginError::CommandError("missing audience".into()))?
+                    .to_string();
+
+                let workspace_root = match self.workspace_root.read().unwrap().clone() {
+                    Some(r) => r,
+                    None => return Err(PluginError::CommandError("no workspace root set".into())),
+                };
+
+                let config = self.config.read().unwrap().clone();
+                let audience_config = config
+                    .audience_states
+                    .get(&audience_name)
+                    .cloned()
+                    .unwrap_or_default();
+
+                let format = self.format_with_workspace_theme().await;
+
+                self.render_and_send_email(
+                    &namespace_id,
+                    &audience_name,
+                    &audience_config,
+                    &workspace_root,
+                    &[],
+                    &*format,
+                )
+                .await
+                .map_err(|e| PluginError::CommandError(e))?;
+
+                Ok(serde_json::json!({ "ok": true, "audience": audience_name }))
             }
 
             _ => Err(PluginError::CommandError(format!(

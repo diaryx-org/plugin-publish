@@ -12,7 +12,9 @@ use diaryx_core::frontmatter;
 use diaryx_core::link_parser;
 
 use super::publish_format::PublishFormat;
-use super::types::{NavLink, PublishOptions, PublishTheme, PublishedPage, SiteNavNode, SiteNavigation};
+use super::types::{
+    NavLink, PublishOptions, PublishTheme, PublishedPage, SiteNavNode, SiteNavigation,
+};
 
 /// HTML output format backed by comrak.
 ///

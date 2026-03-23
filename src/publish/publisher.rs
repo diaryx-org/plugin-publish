@@ -53,6 +53,30 @@ impl<'a, FS: AsyncFileSystem + Clone> Publisher<'a, FS> {
     /// Render all workspace files to memory without writing to the filesystem.
     ///
     /// This method is available on all targets (including WASM).
+    /// Collect and process pages for an audience without rendering full HTML wrappers.
+    ///
+    /// Returns `PublishedPage` objects with `rendered_body` containing just the
+    /// converted markdown body (no page chrome, nav, metadata pills, etc.).
+    /// Useful for email digest rendering where the email format provides its own wrapper.
+    pub async fn collect_pages(
+        &self,
+        workspace_root: &Path,
+        options: &PublishOptions,
+    ) -> Result<Vec<PublishedPage>> {
+        let pages = if let Some(ref audience) = options.audience {
+            self.collect_with_audience(
+                workspace_root,
+                Path::new("/tmp/render"),
+                audience,
+                options.default_audience.as_deref(),
+            )
+            .await?
+        } else {
+            self.collect_all(workspace_root).await?
+        };
+        Ok(pages)
+    }
+
     pub async fn render(
         &self,
         workspace_root: &Path,

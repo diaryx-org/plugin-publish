@@ -11,8 +11,8 @@ use indexmap::IndexMap;
 use serde_yaml::Value as YamlValue;
 
 use crate::publish::BodyRenderer;
-use diaryx_plugin_sdk::host;
 use crate::publish_plugin::PublishPlugin;
+use diaryx_plugin_sdk::host;
 
 use crate::host_fs::HostFs;
 

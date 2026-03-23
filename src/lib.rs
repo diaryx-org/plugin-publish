@@ -38,11 +38,26 @@ pub fn manifest(_input: String) -> FnResult<String> {
                         payload: Some(serde_json::json!({ "tab": "account" })),
                     }),
                 },
-                SettingsField::HostWidget { widget_id: "namespace.site-url".into(), sign_in_action: None },
-                SettingsField::HostWidget { widget_id: "namespace.subdomain".into(), sign_in_action: None },
-                SettingsField::HostWidget { widget_id: "namespace.custom-domains".into(), sign_in_action: None },
-                SettingsField::HostWidget { widget_id: "namespace.audiences".into(), sign_in_action: None },
-                SettingsField::HostWidget { widget_id: "namespace.publish-button".into(), sign_in_action: None },
+                SettingsField::HostWidget {
+                    widget_id: "namespace.site-url".into(),
+                    sign_in_action: None,
+                },
+                SettingsField::HostWidget {
+                    widget_id: "namespace.subdomain".into(),
+                    sign_in_action: None,
+                },
+                SettingsField::HostWidget {
+                    widget_id: "namespace.custom-domains".into(),
+                    sign_in_action: None,
+                },
+                SettingsField::HostWidget {
+                    widget_id: "namespace.audiences".into(),
+                    sign_in_action: None,
+                },
+                SettingsField::HostWidget {
+                    widget_id: "namespace.publish-button".into(),
+                    sign_in_action: None,
+                },
             ],
         },
     };
@@ -122,6 +137,12 @@ pub fn manifest(_input: String) -> FnResult<String> {
             method: "DELETE".into(),
             path: "/namespaces/{id}/objects/{key}".into(),
             description: "Delete a stale published artifact from a namespace".into(),
+        },
+        ServerFunctionDecl {
+            name: "send_audience_email".into(),
+            method: "POST".into(),
+            path: "/namespaces/{id}/audiences/{audience}/send-email".into(),
+            description: "Send the email draft for an audience to all subscribers".into(),
         },
     ])
     .requested_permissions(GuestRequestedPermissions {

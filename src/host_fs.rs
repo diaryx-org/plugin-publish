@@ -82,8 +82,7 @@ impl AsyncFileSystem for HostFs {
             let to_str = to.to_string_lossy();
             let content =
                 host::fs::read_file(&from_str).map_err(|e| Error::new(ErrorKind::Other, e))?;
-            host::fs::write_file(&to_str, &content)
-                .map_err(|e| Error::new(ErrorKind::Other, e))?;
+            host::fs::write_file(&to_str, &content).map_err(|e| Error::new(ErrorKind::Other, e))?;
             let _ = host::fs::write_file(&from_str, "");
             Ok(())
         })
@@ -92,8 +91,7 @@ impl AsyncFileSystem for HostFs {
     fn write_binary<'a>(&'a self, path: &'a Path, content: &'a [u8]) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let path_str = path.to_string_lossy();
-            host::fs::write_binary(&path_str, content)
-                .map_err(|e| Error::new(ErrorKind::Other, e))
+            host::fs::write_binary(&path_str, content).map_err(|e| Error::new(ErrorKind::Other, e))
         })
     }
 

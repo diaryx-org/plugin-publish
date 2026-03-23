@@ -31,10 +31,7 @@ pub struct EmailDigestOptions<'a> {
 /// Render a digest email from a list of published pages.
 ///
 /// Returns fully inlined HTML ready for email delivery.
-pub fn render_email_digest(
-    entries: &[PublishedPage],
-    options: &EmailDigestOptions<'_>,
-) -> String {
+pub fn render_email_digest(entries: &[PublishedPage], options: &EmailDigestOptions<'_>) -> String {
     let colors = resolve_colors(options.theme);
     let mjml = build_mjml(entries, options, &colors);
 
@@ -248,9 +245,6 @@ fn build_mjml(
     pre code {{ background: none; padding: 0; }}
     blockquote {{ border-left: 3px solid {accent}; margin: 1em 0; padding-left: 1em; color: {text_muted}; font-style: italic; }}
     img {{ max-width: 100%; height: auto; border-radius: 6px; }}
-    table {{ width: 100%; border-collapse: collapse; }}
-    th, td {{ border: 1px solid {border}; padding: 8px; text-align: left; }}
-    th {{ background: {code_bg}; }}
     hr {{ border: none; border-top: 1px solid {border}; margin: 2em 0; }}
     .highlight-mark {{ padding: 0.1em 0.2em; border-radius: 0.2em; }}
     .highlight-red {{ background: #fecaca; }}

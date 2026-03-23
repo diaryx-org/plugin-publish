@@ -6,10 +6,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use diaryx_core::fs::AsyncFileSystem;
 use super::content_provider::{ContentProvider, MaterializedFile};
-use diaryx_core::workspace::Workspace;
 use async_trait::async_trait;
+use diaryx_core::fs::AsyncFileSystem;
+use diaryx_core::workspace::Workspace;
 
 /// Content provider that reads files from a local filesystem.
 ///
