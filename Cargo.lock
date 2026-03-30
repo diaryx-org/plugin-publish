@@ -343,6 +343,7 @@ dependencies = [
 [[package]]
 name = "diaryx_core"
 version = "1.4.0"
+source = "git+https://github.com/diaryx-org/diaryx.git?rev=b234e40961aa94742375baae31864d396b552fc7#b234e40961aa94742375baae31864d396b552fc7"
 dependencies = [
  "async-trait",
  "base64",

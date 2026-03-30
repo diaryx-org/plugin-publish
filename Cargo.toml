@@ -30,8 +30,8 @@ futures-lite = "2"
 
 [patch.crates-io]
 getrandom = { git = "https://github.com/diaryx-org/plugin-sdk.git", subdirectory = "patches/getrandom-0.2" }
-diaryx_plugin_sdk = { path = "../plugin-sdk" }
-diaryx_core = { path = "../diaryx/crates/diaryx_core" }
+diaryx_plugin_sdk = { git = "https://github.com/diaryx-org/plugin-sdk.git" }
+diaryx_core = { git = "https://github.com/diaryx-org/diaryx.git", rev = "b234e40961aa94742375baae31864d396b552fc7" }
 
 [profile.release]
 lto = "fat"
