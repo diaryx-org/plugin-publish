@@ -195,7 +195,8 @@ impl<'a, FS: AsyncFileSystem + Clone> Publisher<'a, FS> {
             return Ok((vec![], vec![]));
         }
 
-        let attachment_paths = Self::collect_attachment_paths(&pages, workspace_root);
+        let workspace_dir = workspace_root.parent().unwrap_or(workspace_root);
+        let attachment_paths = Self::collect_attachment_paths(&pages, workspace_dir);
 
         let site_title = options.title.clone().unwrap_or_else(|| {
             pages
@@ -1021,7 +1022,8 @@ pub fn nav_for_page(
 /// Extract local file reference paths from markdown text.
 ///
 /// Finds references inside markdown link/image syntax `[...](...)`
-/// and HTML attributes `src="..."` / `href="..."`. Excludes external
+/// and HTML attributes `src="..."` / `href="..."` / `srcset="..."`.
+/// Excludes external
 /// URLs, anchors, and data/javascript URIs.
 fn extract_local_file_refs(markdown: &str) -> Vec<String> {
     let mut paths = Vec::new();
@@ -1055,6 +1057,25 @@ fn extract_local_file_refs(markdown: &str) -> Vec<String> {
             } else {
                 break;
             }
+        }
+    }
+
+    // Find paths in HTML srcset attributes: srcset="path 1x, other 2x"
+    let mut remaining = markdown;
+    while let Some(pos) = remaining.find("srcset=\"") {
+        remaining = &remaining[pos + "srcset=\"".len()..];
+        if let Some(end) = remaining.find('"') {
+            let srcset = remaining[..end].trim();
+            for candidate in srcset.split(',') {
+                let candidate = candidate.trim();
+                let path = candidate.split_whitespace().next().unwrap_or("").trim();
+                if is_local_file_ref(path) {
+                    paths.push(path.to_string());
+                }
+            }
+            remaining = &remaining[end + 1..];
+        } else {
+            break;
         }
     }
 
@@ -1213,6 +1234,17 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_local_file_refs_html_srcset() {
+        let md = r#"<picture><source media="(prefers-color-scheme: dark)" srcset="apps/web/public/icon-dark.png"><source media="(prefers-color-scheme: light)" srcset="apps/web/public/icon.png 1x, apps/web/public/icon@2x.png 2x"><img alt="Diaryx icon" src="apps/web/public/icon.png" width="128"></picture>"#;
+        let refs = extract_local_file_refs(md);
+        assert_eq!(refs.len(), 4);
+        assert_eq!(refs[0], "apps/web/public/icon.png");
+        assert_eq!(refs[1], "apps/web/public/icon-dark.png");
+        assert_eq!(refs[2], "apps/web/public/icon.png");
+        assert_eq!(refs[3], "apps/web/public/icon@2x.png");
+    }
+
+    #[test]
     fn test_extract_local_file_refs_skips_external_and_anchors() {
         let md = "[link](https://example.com)\n[anchor](#heading)\n[mail](mailto:a@b.com)\nplain text (no file ref)";
         let refs = extract_local_file_refs(md);
@@ -1357,6 +1389,45 @@ mod tests {
         assert!(
             fs.read_binary(&dest2.join("_attachments/image.png"))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn test_render_with_attachments_uses_workspace_directory_for_attachment_sources() {
+        use super::super::html_format::HtmlFormat;
+        use diaryx_core::fs::FileSystem;
+
+        let fs = diaryx_core::fs::InMemoryFileSystem::new();
+        let workspace_dir = Path::new("/workspace");
+        let workspace_root = workspace_dir.join("README.md");
+        fs.create_dir_all(workspace_dir).unwrap();
+        fs.create_dir_all(&workspace_dir.join("_attachments"))
+            .unwrap();
+        fs.write_file(
+            &workspace_root,
+            "---\ntitle: Test Site\ncontents: []\n---\n\n![photo](_attachments/image.png)\n",
+        )
+        .unwrap();
+        fs.write_binary(
+            &workspace_dir.join("_attachments/image.png"),
+            b"fake-png-data",
+        )
+        .unwrap();
+
+        let async_fs = diaryx_core::fs::SyncToAsyncFs::new(fs);
+        let renderer = super::super::body_renderer::NoopBodyRenderer;
+        let format = HtmlFormat::new();
+        let publisher = Publisher::new(async_fs, &renderer, &format);
+
+        let (_rendered, attachments) = futures_lite::future::block_on(
+            publisher.render_with_attachments(&workspace_root, &PublishOptions::default()),
+        )
+        .unwrap();
+
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(
+            attachments[0].0,
+            workspace_dir.join("_attachments/image.png")
         );
     }
 

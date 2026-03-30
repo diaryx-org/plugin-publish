@@ -88,6 +88,13 @@ impl AsyncFileSystem for HostFs {
         })
     }
 
+    fn read_binary<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, Result<Vec<u8>>> {
+        Box::pin(async move {
+            let path_str = path.to_string_lossy();
+            host::fs::read_binary(&path_str).map_err(|e| Error::new(ErrorKind::Other, e))
+        })
+    }
+
     fn write_binary<'a>(&'a self, path: &'a Path, content: &'a [u8]) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let path_str = path.to_string_lossy();

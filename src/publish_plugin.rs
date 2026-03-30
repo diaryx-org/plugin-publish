@@ -27,6 +27,7 @@ use diaryx_core::plugin::{
     Plugin, PluginCapability, PluginContext, PluginError, PluginId, PluginManifest, UiContribution,
     WorkspaceOpenedEvent, WorkspacePlugin,
 };
+use diaryx_core::workspace::Workspace;
 
 // ============================================================================
 // PublishPlugin struct
@@ -145,10 +146,61 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
 // ============================================================================
 
 impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
+    fn workspace_dir_from_path(path: &Path) -> PathBuf {
+        if matches!(
+            path.extension().and_then(|ext| ext.to_str()),
+            Some(ext) if ext.eq_ignore_ascii_case("md")
+        ) {
+            path.parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| path.to_path_buf())
+        } else {
+            path.to_path_buf()
+        }
+    }
+
+    async fn resolve_root_index_path(&self, workspace_path: &Path) -> Result<PathBuf, DiaryxError> {
+        if matches!(
+            workspace_path.extension().and_then(|ext| ext.to_str()),
+            Some(ext) if ext.eq_ignore_ascii_case("md")
+        ) {
+            return Ok(workspace_path.to_path_buf());
+        }
+
+        let workspace = Workspace::new(self.fs.clone());
+        workspace
+            .find_root_index_in_dir(workspace_path)
+            .await?
+            .ok_or_else(|| {
+                DiaryxError::Unsupported(format!(
+                    "no root index found in workspace '{}'",
+                    workspace_path.display()
+                ))
+            })
+    }
+
+    async fn current_root_index_path(&self) -> Result<PathBuf, DiaryxError> {
+        let workspace_path = self
+            .workspace_root
+            .read()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| DiaryxError::Unsupported("no workspace root".into()))?;
+        self.resolve_root_index_path(&workspace_path).await
+    }
+
+    fn current_workspace_dir(&self) -> Option<PathBuf> {
+        self.workspace_root
+            .read()
+            .unwrap()
+            .clone()
+            .map(|path| Self::workspace_dir_from_path(&path))
+    }
+
     /// Resolve a workspace-relative path against the workspace root.
     #[allow(dead_code)]
     fn resolve_path(&self, path: &str) -> PathBuf {
-        match self.workspace_root.read().unwrap().as_ref() {
+        match self.current_workspace_dir() {
             Some(root) => root.join(path),
             None => PathBuf::from(path),
         }
@@ -156,9 +208,9 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
 
     /// Load publish plugin config from root frontmatter `plugins.diaryx.publish`.
     async fn load_config(&self) {
-        let root = match self.workspace_root.read().unwrap().clone() {
-            Some(r) => r,
-            None => return,
+        let root = match self.current_root_index_path().await {
+            Ok(root) => root,
+            Err(_) => return,
         };
         if let Ok(content) = self.fs.read_to_string(&root).await {
             if let Ok(parsed) = diaryx_core::frontmatter::parse_or_empty(&content) {
@@ -180,10 +232,7 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
 
     /// Save publish plugin config to root frontmatter `plugins.diaryx.publish`.
     async fn save_config_to_frontmatter(&self) -> Result<(), DiaryxError> {
-        let root = match self.workspace_root.read().unwrap().clone() {
-            Some(r) => r,
-            None => return Err(DiaryxError::Unsupported("no workspace root".into())),
-        };
+        let root = self.current_root_index_path().await?;
         let content = self
             .fs
             .read_to_string(&root)
@@ -225,8 +274,8 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
 
     /// Read default_audience from workspace config.
     async fn default_audience(&self) -> Option<String> {
-        let root = self.workspace_root.read().unwrap().clone()?;
-        let ws = diaryx_core::workspace::Workspace::new(self.fs.clone());
+        let root = self.current_root_index_path().await.ok()?;
+        let ws = Workspace::new(self.fs.clone());
         ws.get_workspace_config(&root)
             .await
             .ok()
@@ -275,10 +324,7 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
 
         // Read and render cover file if configured (strip frontmatter first)
         let cover_html = if let Some(cover_path) = &audience_config.email_cover {
-            let cover_full_path = workspace_root
-                .parent()
-                .unwrap_or(workspace_root)
-                .join(cover_path);
+            let cover_full_path = Self::workspace_dir_from_path(workspace_root).join(cover_path);
             match self.fs.read_to_string(&cover_full_path).await {
                 Ok(raw) => {
                     // Strip frontmatter before rendering
@@ -299,10 +345,7 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
         };
 
         // Load theme for email rendering
-        let workspace_dir = workspace_root
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| workspace_root.to_path_buf());
+        let workspace_dir = Self::workspace_dir_from_path(workspace_root);
         let theme = self.load_workspace_theme(&workspace_dir).await;
 
         // Resolve site title from workspace root entry (same as publisher)
@@ -393,11 +436,8 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
     /// `.diaryx/themes/library.json` (for theme definitions). If the theme
     /// files don't exist or the preset isn't found, returns the default format.
     async fn format_with_workspace_theme(&self) -> Arc<dyn PublishFormat> {
-        let workspace_dir = match self.workspace_root.read().unwrap().clone() {
-            Some(root) => {
-                // workspace_root is the root file path; go up to the directory
-                root.parent().map(|p| p.to_path_buf()).unwrap_or(root)
-            }
+        let workspace_dir = match self.current_workspace_dir() {
+            Some(root) => root,
             None => return self.format.clone(),
         };
 
@@ -725,10 +765,10 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
                     .ok_or_else(|| PluginError::CommandError("missing namespace_id".into()))?
                     .to_string();
 
-                let workspace_root = match self.workspace_root.read().unwrap().clone() {
-                    Some(r) => r,
-                    None => return Err(PluginError::CommandError("no workspace root set".into())),
-                };
+                let workspace_root = self
+                    .current_root_index_path()
+                    .await
+                    .map_err(|e| PluginError::CommandError(e.to_string()))?;
 
                 let config = self.config.read().unwrap().clone();
                 let default_aud = self.default_audience().await;
@@ -838,8 +878,14 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
                     // Upload attachments (images, PDFs, etc.)
                     for (src_path, dest_rel) in &attachment_paths {
                         let key = format!("{}/{}", audience_name, dest_rel.display());
-                        match diaryx_plugin_sdk::host::fs::read_binary(&src_path.to_string_lossy())
-                        {
+                        if !self.fs.exists(src_path).await {
+                            log::warn!(
+                                "Skipping attachment {}: source file does not exist",
+                                src_path.display()
+                            );
+                            continue;
+                        }
+                        match self.fs.read_binary(src_path).await {
                             Ok(bytes) => {
                                 let mime = mime_type_from_ext(dest_rel);
                                 diaryx_plugin_sdk::host::namespace::put_object(
@@ -933,10 +979,10 @@ impl<FS: AsyncFileSystem + Clone + 'static> PublishPlugin<FS> {
                     .ok_or_else(|| PluginError::CommandError("missing audience".into()))?
                     .to_string();
 
-                let workspace_root = match self.workspace_root.read().unwrap().clone() {
-                    Some(r) => r,
-                    None => return Err(PluginError::CommandError("no workspace root set".into())),
-                };
+                let workspace_root = self
+                    .current_root_index_path()
+                    .await
+                    .map_err(|e| PluginError::CommandError(e.to_string()))?;
 
                 let config = self.config.read().unwrap().clone();
                 let audience_config = config
@@ -1036,5 +1082,55 @@ mod tests {
             }
             other => panic!("expected declarative component, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn saves_config_to_root_index_when_workspace_root_is_directory() {
+        let plugin = create_test_plugin();
+        let root_index = PathBuf::from("workspace/Diaryx.md");
+        let workspace_dir = PathBuf::from("workspace");
+
+        block_on(
+            plugin
+                .fs
+                .write_file(&root_index, "---\ncontents: []\n---\n"),
+        )
+        .expect("root index write should succeed");
+        *plugin.workspace_root.write().unwrap() = Some(workspace_dir);
+        plugin.config.write().unwrap().namespace_id = Some("ns_123".into());
+
+        block_on(plugin.save_config_to_frontmatter()).expect("config save should succeed");
+
+        let content = block_on(plugin.fs.read_to_string(&root_index)).expect("root index exists");
+        assert!(content.contains("namespace_id: ns_123"));
+    }
+
+    #[test]
+    fn resolve_path_uses_workspace_directory_when_workspace_root_is_file() {
+        let plugin = create_test_plugin();
+        *plugin.workspace_root.write().unwrap() = Some(PathBuf::from("workspace/Diaryx.md"));
+
+        assert_eq!(
+            plugin.resolve_path("assets/cover.md"),
+            PathBuf::from("workspace/assets/cover.md")
+        );
+    }
+
+    #[test]
+    fn current_root_index_path_resolves_workspace_directory() {
+        let plugin = create_test_plugin();
+        let root_index = PathBuf::from("workspace/Diaryx.md");
+
+        block_on(
+            plugin
+                .fs
+                .write_file(&root_index, "---\ncontents: []\n---\n"),
+        )
+        .expect("root index write should succeed");
+        *plugin.workspace_root.write().unwrap() = Some(PathBuf::from("workspace"));
+
+        let resolved =
+            block_on(plugin.current_root_index_path()).expect("root index should resolve");
+        assert_eq!(resolved, root_index);
     }
 }
